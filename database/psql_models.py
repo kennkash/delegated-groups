@@ -1,15 +1,17 @@
-import sqlalchemy as db
+#ops-utilities/delegated-groups/database/psql_models.py
 from sqlalchemy import (create_engine, MetaData, Column,
 BigInteger,
 Text,
+text,
 DateTime,
 UniqueConstraint,
 ForeignKey,
 func,
+PrimaryKeyConstraint,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
-from services.credentials.tokens import AtlassianToken
+from ..services.credentials.tokens import AtlassianToken
 
 
 # creating connection to postegresql db
@@ -49,7 +51,6 @@ class DgManagedGroup(Base):
     app = Column(Text, nullable=False) # 'jira' or 'confluence'
     group_name = Column(Text, nullable=False)
     lower_group_name = Column(Text, nullable=False)
-    delegation_id = Column(BigInteger, nullable=False)
 
     __table_args__ = (
     UniqueConstraint("app", "lower_group_name", name="uq_app_group"),
@@ -90,7 +91,6 @@ class DgGroupOwner(Base):
 
     managed_group = relationship("DgManagedGroup", back_populates="owners")
     user = relationship("DgUser", back_populates="owners")
-
 
 
 session = SessionLocal()
