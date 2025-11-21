@@ -1,5 +1,6 @@
-import database.psql_models as models
-from database.psql_models import DgUser, DgManagedGroup, DgGroupOwner
+# ops-utilities/delegated-groups/import/import_delegated_data.py
+from ..database import psql_models as models
+from ..database.psql_models import DgUser, DgManagedGroup, DgGroupOwner
 from prettiprint import ConsoleUtils
 import csv
 from collections import OrderedDict
@@ -17,7 +18,6 @@ def read_csv_rows(path: str):
         reader = csv.DictReader(f)
         for row in reader:
             row["app"] = row["app"].lower()
-            row["delegation_id"] = int(row["delegation_id"])
             row["group_name"] = row["group_name"]
             row["lower_group_name"] = row["lower_group_name"].lower()
             row["user_key"] = row["user_key"]
@@ -29,8 +29,8 @@ def read_csv_rows(path: str):
     return rows
 
 
-def main():
-    rows = read_csv_rows(CSV_PATH_JIRA)
+def main(csv_path: str):
+    rows = read_csv_rows(csv_path)
 
     # Build unique users and groups
     unique_users = OrderedDict()
@@ -75,7 +75,6 @@ def main():
             app=app,
             group_name=data["group_name"],
             lower_group_name=lower_group_name,
-            delegation_id=data["delegation_id"],
             )
             session.add(g)
             group_objs[(app, lower_group_name)] = g
@@ -117,4 +116,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    for path in (CSV_PATH_JIRA, CSV_PATH_CONF):
+        main(path)
