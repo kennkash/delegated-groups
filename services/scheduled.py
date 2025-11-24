@@ -384,3 +384,25 @@ def _fetch_confluence_group_members(group: str) -> List[Tuple[str, Optional[str]
 
     return members
 
+
+
+[
+  {
+    "username": "a.arinov",
+    "lower_username": "a.arinov",
+    "email": "a.arinov@partner.samsung.com",
+    "lower_email": "a.arinov@partner.samsung.com"
+  },
+  {
+    "username": "a.blessing",
+    "lower_username": "a.blessing",
+    "email": "a.blessing@samsung.com",
+    "lower_email": "a.blessing@samsung.com"
+  },
+  {
+    "username": "a.lee",
+    "lower_username": "a.lee",
+    "email": "a.lee@samsung.com",
+    "lower_email": "a.lee@samsung.com"
+  }
+]
