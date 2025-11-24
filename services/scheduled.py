@@ -282,3 +282,105 @@ if __name__ == "__main__":
     },
   ]
 }
+
+# ---------------------------------------------------------------------------
+# Confluence group members via REST API (with ScriptRunner email lookup)
+# ---------------------------------------------------------------------------
+
+def _fetch_confluence_group_members(group: str) -> List[Tuple[str, Optional[str]]]:
+    """
+    Fetch Confluence group members via:
+      GET /rest/api/group/{group}/member?limit=<limit>&start=<start>
+
+    For each username, also call ScriptRunner:
+      GET /rest/scriptrunner/latest/custom/getUserDetails?username={username}
+
+    Returns:
+        list of (username, email) tuples
+
+    This ensures we always have an email for Confluence users (when available),
+    so we don't end up creating separate dg_user rows for the same username
+    with and without email.
+    """
+    headers = _get_auth_header("confluence")
+    session = get_external_api_session()
+
+    encoded_group = urllib.parse.quote(group, safe="")
+    api_path = f"{CONF_BASE_URL}api/group/{encoded_group}/member"
+
+    members: List[Tuple[str, Optional[str]]] = []
+
+    # cache ScriptRunner lookups per run to avoid hitting the endpoint
+    # multiple times for the same username
+    user_detail_cache: dict[str, Optional[str]] = {}
+
+    def _get_email_for_username(username: str) -> Optional[str]:
+        """
+        Use ScriptRunner custom REST endpoint to fetch user details, including email.
+        """
+        if username in user_detail_cache:
+            return user_detail_cache[username]
+
+        encoded_username = urllib.parse.quote(username, safe="")
+        user_url = (
+            f"{CONF_BASE_URL}scriptrunner/latest/custom/getUserDetails"
+            f"?username={encoded_username}"
+        )
+
+        resp = session.get(user_url, headers=headers)
+        time.sleep(REQUEST_SLEEP_SECONDS)  # respect rate limit
+
+        if resp.status_code != 200:
+            cu.warning(
+                f"[Confluence] Failed to fetch user details for '{username}' "
+                f"(status={resp.status_code}): {resp.text[:200]}"
+            )
+            email = None
+        else:
+            data = resp.json()
+            email = data.get("email")
+
+        user_detail_cache[username] = email
+        return email
+
+    limit = 200
+    start = 0
+
+    cu.header(f"Starting Confluence group members fetch for group: {group}")
+    while True:
+        url = f"{api_path}?limit={limit}&start={start}"
+        resp = session.get(url, headers=headers)
+        time.sleep(REQUEST_SLEEP_SECONDS)  # respect rate limit
+
+        if resp.status_code != 200:
+            cu.error(
+                f"[Confluence] Failed to fetch members for group '{group}' "
+                f"(status={resp.status_code}): {resp.text[:200]}"
+            )
+            break
+
+        data = resp.json()
+        results = data.get("results", []) or []
+
+        for user in results:
+            username = user.get("username")
+            if not username:
+                continue
+
+            # now we enrich with email via ScriptRunner
+            email = _get_email_for_username(username)
+            members.append((username, email))
+
+        size = len(results)
+        if size < limit:
+            cu.event(
+                f" Finished Confluence group members fetch for group: {group}. "
+                f"Found {len(members)} members.",
+                level="SUCCESS",
+            )
+            break
+
+        start += limit
+
+    return members
+
