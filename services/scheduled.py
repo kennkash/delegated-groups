@@ -406,3 +406,92 @@ def _fetch_confluence_group_members(group: str) -> List[Tuple[str, Optional[str]
     "lower_email": "a.lee@samsung.com"
   }
 ]
+
+# ---------------------------------------------------------------------------
+# Confluence group members via REST API (using getAllEmails for emails)
+# ---------------------------------------------------------------------------
+
+def _fetch_confluence_group_members(group: str) -> List[Tuple[str, Optional[str]]]:
+    """
+    Fetch Confluence group members via:
+      GET /rest/api/group/{group}/member?limit=<limit>&start=<start>
+
+    Then enrich with email using ScriptRunner:
+      GET /rest/scriptrunner/latest/custom/getAllEmails
+
+    Returns:
+        list of (username, email) tuples
+    """
+    headers = _get_auth_header("confluence")
+    session = get_external_api_session()
+
+    # 1) Fetch full username -> email map once via ScriptRunner
+    emails_url = f"{CONF_BASE_URL}scriptrunner/latest/custom/getAllEmails"
+    cu.header("Fetching Confluence user email map via getAllEmails")
+    resp = session.get(emails_url, headers=headers)
+    time.sleep(REQUEST_SLEEP_SECONDS)  # respect rate limit
+
+    if resp.status_code != 200:
+        cu.error(
+            f"[Confluence] Failed to fetch getAllEmails "
+            f"(status={resp.status_code}): {resp.text[:200]}"
+        )
+        email_map: dict[str, Optional[str]] = {}
+    else:
+        data = resp.json() or []
+        # lower_username -> email
+        email_map = {
+            (entry.get("lower_username") or "").lower(): entry.get("email")
+            for entry in data
+            if entry.get("lower_username")
+        }
+        cu.event(
+            f"Loaded {len(email_map)} user email entries from getAllEmails",
+            level="INFO",
+        )
+
+    encoded_group = urllib.parse.quote(group, safe="")
+    api_path = f"{CONF_BASE_URL}api/group/{encoded_group}/member"
+
+    members: List[Tuple[str, Optional[str]]] = []
+
+    limit = 200
+    start = 0
+
+    cu.header(f"Starting Confluence group members fetch for group: {group}")
+    while True:
+        url = f"{api_path}?limit={limit}&start={start}"
+        resp = session.get(url, headers=headers)
+        time.sleep(REQUEST_SLEEP_SECONDS)  # respect rate limit
+
+        if resp.status_code != 200:
+            cu.error(
+                f"[Confluence] Failed to fetch members for group '{group}' "
+                f"(status={resp.status_code}): {resp.text[:200]}"
+            )
+            break
+
+        data = resp.json()
+        results = data.get("results", []) or []
+
+        for user in results:
+            username = user.get("username")
+            if not username:
+                continue
+
+            lower_username = username.lower()
+            email = email_map.get(lower_username)
+            members.append((username, email))
+
+        size = len(results)
+        if size < limit:
+            cu.event(
+                f" Finished Confluence group members fetch for group: {group}. "
+                f"Found {len(members)} members.",
+                level="SUCCESS",
+            )
+            break
+
+        start += limit
+
+    return members
