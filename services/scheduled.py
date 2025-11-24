@@ -214,3 +214,71 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+/rest/scriptrunner/latest/custom/getUserDetails?username=kkashmiry0641
+
+
+{
+  "displayName": "Kennedy Kashmiry",
+  "username": "kkashmiry0641",
+  "email": "k.kashmiry@samsung.com",
+  "knoxID": "k.kashmiry",
+  "imLink": "mysingleim://k.kashmiry",
+  "profilePicture": "https://confluence.samsungaustin.com/rest/scriptrunner/latest/custom/getUserAvatar?profilePictureID=96107252",
+  "lastLogin": "2025-11-24T18:28:50+0000",
+  "memberOf": [
+    "automation engineering guest",
+    "bc_gotomeeting",
+    "BC_youtube",
+    "Canon East Users",
+    "confluence-administrators",
+    "confluence-license-group",
+  ],
+  "recentPages": [
+    {
+      "title": "Power User Meeting - 11/5/2025",
+      "pageUrl": "/pages/viewpage.action?pageId=775135849",
+      "status": "current",
+      "id": "775135849",
+      "excerpt": " \n\n\nGlobalAD\n\nBackground on Upcoming Changes\n\nCurrent State\n\nPotential Future State\n\nAvailable Alternatives\n\nOpen Discussion\n\n\n\n\n\n\nGlobal AD will be coming to Spotfire by EOY\n\nWe have configured it successfully in our development environment\n\nNeed to conduct a few tests before pushing to production\n\n\n\n\n\n\n\n\nSpotfire is",
+      "friendlyLastModified": "Nov 21, 2025",
+      "spaceUrl": "/display/SPOTFIRE",
+      "spaceTitle": "Spotfire"
+    },
+    {
+      "title": "Announcement Banners with Dismiss Option",
+      "pageUrl": "/display/ADMIN/Announcement+Banners+with+Dismiss+Option",
+      "status": "current",
+      "id": "792702954",
+      "excerpt": "Announcement Banner with Dismiss Option - Confluence\n\nScript displays the announcement banner and also a dismiss button that expands into a drop down with options for the dismiss duration (1 hour, 8hrs, indefinitely). The banner is then dismissed/hidden for the duration that the user selected. \n\nThe script also hides t",
+      "friendlyLastModified": "Nov 20, 2025",
+      "spaceUrl": "/display/ADMIN",
+      "spaceTitle": "Knowledge Solutions"
+    },
+  ],
+  "adminSpaces": [
+    {
+      "name": "14nm Planar Development",
+      "key": "14MV",
+      "url": "https://confluence.samsungaustin.com/display/14MV",
+      "type": "Global"
+    },
+    {
+      "name": "AMHS Engineering",
+      "key": "AE",
+      "url": "https://confluence.samsungaustin.com/display/AE",
+      "type": "Global"
+    },
+  ]
+}
