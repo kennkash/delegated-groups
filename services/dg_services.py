@@ -418,3 +418,66 @@ def create_group_with_owners(
                     )
 
         session.commit()
+        
+        
+        
+from typing import Callable, Iterable, Tuple, Optional
+
+
+def sync_all_group_owners(
+    fetch_members_for_group: Callable[[str, str], Iterable[Tuple[str, Optional[str]]]],
+) -> None:
+    """
+    Run GROUP_OWNER membership reconciliation for *every* delegated group that
+    currently has GROUP_OWNER rows.
+
+    This is intended to be called from a scheduled job.
+
+    Arguments:
+      fetch_members_for_group(app, owning_group_name) -> iterable of (username, email)
+        - app: 'jira' or 'confluence'
+        - owning_group_name: the group stored in via_group_name
+        - returns the CURRENT members of that group in the source system
+          (Jira/Confluence), as (username, email) tuples.
+
+    Behavior:
+      1. Query dg_group_owner + dg_managed_group for all distinct
+         (app, delegated_group, via_group_name) where source_type='GROUP_OWNER'.
+      2. For each (app, delegated_group, via_group_name):
+           - call fetch_members_for_group(app, via_group_name)
+           - call sync_group_owners_for_delegated_group(...) with that member list.
+    """
+    # Step 1: collect all unique (app, delegated_group, via_group_name) combos
+    with SessionLocal() as session:
+        rows = (
+            session.query(
+                DgManagedGroup.app,
+                DgManagedGroup.group_name,
+                DgGroupOwner.via_group_name,
+            )
+            .join(
+                DgManagedGroup,
+                DgManagedGroup.id == DgGroupOwner.managed_group_id,
+            )
+            .filter(DgGroupOwner.source_type == "GROUP_OWNER")
+            .filter(DgGroupOwner.via_group_name.isnot(None))
+            .distinct()
+            .all()
+        )
+
+    # Step 2: loop over each combo and reconcile membership
+    for app, delegated_group, via_group_name in rows:
+        if not via_group_name:
+            # Shouldn't happen because of filter, but be safe
+            continue
+
+        # You implement this in your scheduled script
+        members = list(fetch_members_for_group(app, via_group_name))
+
+        # Re-use the existing sync logic for that one pair
+        sync_group_owners_for_delegated_group(
+            app=app,
+            delegated_group=delegated_group,
+            owning_group_name=via_group_name,
+            members=members,
+        )
