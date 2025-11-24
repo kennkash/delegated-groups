@@ -1,4 +1,4 @@
-# delegated-groups/jobs/run_group_owner_sync.py
+# delGroups_mem_refresh/refresh.py
 
 from __future__ import annotations
 
