@@ -64,6 +64,55 @@ The application supports both Jira and Confluence using a unified schema.
 <summary><strong>View the Architecture</strong></summary>
 <!--All you need is a blank line-->
 
+     +---------------------+
+     |       dg_user       |
+     |---------------------|
+     | id (PK)             |
+     | username            |
+     | email               |
+     | lower_username      |
+     | lower_email         |
+     +---------▲-----------+
+               │ (many ownership rows
+               │ reference one user)
+               │
+     +---------┴-----------+
+     |    dg_group_owner   |
+     |---------------------|
+     | id (PK)             |
+     | user_id (FK)        |----> dg_user.id
+     | managed_group_id(FK)|----> dg_managed_group.id
+     | source_type         |
+     | via_group_name      |
+     | created_at          |
+     +---------▲-----------+
+               │
+(many owners)  │
+               │
+     +---------┴-----------+
+     |   dg_managed_group  |
+     |---------------------|
+     | id (PK)             |
+     | app                 | ----> 'jira' / 'confluence'
+     | group_name          |
+     | lower_group_name    |
+     +---------------------+
+
+     Read-only View (joins the above)
+     +-----------------------------------------------+
+     | vw_delegated_group_owners                     |
+     |-----------------------------------------------|
+     | app                                           |
+     | delegated_group                               |
+     | delegated_group_lower                         |
+     | owner_username                                |
+     | owner_email                                   |
+     | owner_type (USER_OWNER / GROUP_OWNER)         |
+     | via_group_name                                |
+     | owner_created_at                              |
+     +-----------------------------------------------+
+
+
 ```text
      +---------------------+
      |       dg_user       |
