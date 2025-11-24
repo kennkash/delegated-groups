@@ -1,4 +1,4 @@
-# delegated-groups/services/dg_service.py
+# delGroups_mem_refresh/dg_service.py
 
 from __future__ import annotations
 
