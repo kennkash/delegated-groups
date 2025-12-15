@@ -25,6 +25,8 @@ The application supports both Jira and Confluence using a unified schema.
     │   ├── credentials/
     │   │   └── tokens.py      # Credential management for database access
     │   └── __init__.py
+    ├── sql/
+    │   └── msql_queries.sql      # SQL queries to run in SQL Server Management Studio to generate CSV exports
     ├── tests/
     │   └── test_queries.py      # Test queries for the database
     ├── __init__.py
@@ -36,82 +38,48 @@ The application supports both Jira and Confluence using a unified schema.
 
 ### 1. `database/psql_models.py`
 - Contains SQLAlchemy ORM models for:
-  - `DgUser`: Represents a user with identity information
-  - `DgManagedGroup`: Tracks a group whose ownership is delegated
-  - `DgGroupOwner`: Join table capturing delegated ownership of managed groups
+  - `DgUser`: Represents a unique Jira/Confluence user
+  - `DgManagedGroup`: Tracks delegated groups
+  - `DgGroupOwner`: Join table linking users to the groups they own
 - Sets up the PostgreSQL database connection using credentials from `services/credentials/tokens.py`
 - Creates database tables if they don't exist
 
-### 2. `import/import_delegated_data.py`
+### 2. `database/psql_views.py`
+- Defines the SQLAlchemy ORM mapping for the **read-only view**:
+  - `VwDelegatedGroupOwners`
+    - A flattened view combining:
+      - Delegated groups
+      - Their normalized users
+      - Ownership metadata in both Jira and Confluence
+
+### 3. `import/import_delegated_data.py`
 - Imports delegated group data from CSV files (`effective_owners_jira.csv` and `effective_owners_conf.csv`)
 - Processes CSV data to create unique users and groups
 - Inserts data into the database using the models from `psql_models.py`
-- Tracks ownership relationships between users and groups
+- Rebuilds the materialized view (`vw_delegated_group_owners`) after import
+- Main "data loader" for populated the delegated groups tables
 
-### 3. `services/credentials/tokens.py`
+### 4. `services/credentials/tokens.py`
 - Manages credentials for database access
 - Reads credentials from an S3 bucket (`atlassian-bucket`)
 - Provides the `AtlassianToken` class for secure credential access
 
-### 4. `tests/test_queries.py`
+### 5. `sql/msql_queries.sql`
+- Contains the SQL queries to obtain `effective_owners_jira.csv` and `effective_owners_conf.csv`
+- Queries should be run in SQL Server Management Studio using the `ATLASSDBCLUSTER`
+
+### 6. `tests/test_queries.py`
 - Contains test queries to verify database functionality
 - Provides example queries:
   - `get_my_groups(username)`: Gets all groups for a specific user
   - `get_group_owners(app, group_name)`: Gets all owners for a specific group
+  - `get_all()`: Gets all delegated groups and their owners across both Jira and Confluence 
+- Includes a CLI interface to test queries easily
 
 ## Database Schema
 <details>
 <summary><strong>View the Architecture</strong></summary>
 <!--All you need is a blank line-->
-
-     +---------------------+
-     |       dg_user       |
-     |---------------------|
-     | id (PK)             |
-     | username            |
-     | email               |
-     | lower_username      |
-     | lower_email         |
-     +---------▲-----------+
-               │ (many ownership rows
-               │ reference one user)
-               │
-     +---------┴-----------+
-     |    dg_group_owner   |
-     |---------------------|
-     | id (PK)             |
-     | user_id (FK)        |----> dg_user.id
-     | managed_group_id(FK)|----> dg_managed_group.id
-     | source_type         |
-     | via_group_name      |
-     | created_at          |
-     +---------▲-----------+
-               │
-(many owners)  │
-               │
-     +---------┴-----------+
-     |   dg_managed_group  |
-     |---------------------|
-     | id (PK)             |
-     | app                 | ----> 'jira' / 'confluence'
-     | group_name          |
-     | lower_group_name    |
-     +---------------------+
-
-     Read-only View (joins the above)
-     +-----------------------------------------------+
-     | vw_delegated_group_owners                     |
-     |-----------------------------------------------|
-     | app                                           |
-     | delegated_group                               |
-     | delegated_group_lower                         |
-     | owner_username                                |
-     | owner_email                                   |
-     | owner_type (USER_OWNER / GROUP_OWNER)         |
-     | via_group_name                                |
-     | owner_created_at                              |
-     +-----------------------------------------------+
-
 
 ```text
      +---------------------+
@@ -147,6 +115,21 @@ The application supports both Jira and Confluence using a unified schema.
      | group_name          |
      | lower_group_name    |
      +---------------------+
+
+
+              Read-Only View (joins the above)
+     +-----------------------------------------------+
+     | vw_delegated_group_owners                     |
+     |-----------------------------------------------|
+     | app                                           |
+     | delegated_group                               |
+     | delegated_group_lower                         |
+     | owner_username                                |
+     | owner_email                                   |
+     | owner_type (USER_OWNER / GROUP_OWNER)         |
+     | via_group_name                                |
+     | owner_created_at                              |
+     +-----------------------------------------------+
 ```
 </details>
 
@@ -158,10 +141,12 @@ Represents a unique Jira/Confluence user and their information.
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `BigInteger` | Primary key, auto-incrementing. |
-| `username` | `Text` | Display/user name. |
+| `username` | `Text` | Username from Jira/Confluence. |
 | `email` | `Text` | Optional email address. |
 | `lower_username` | `Text` | Lowercase username for case-insensitive lookups. |
 | `lower_email` | `Text` | Lowercase email for case-insensitive lookups. |
+
+**Constraints:** unique on (`lower_username`, `lower_email`) via `uq_user_identity` to avoid duplicate users. 
 
 **Relationships:** one-to-many with `dg_group_owner` via `DgUser.owners`
 
@@ -176,9 +161,8 @@ Tracks a group whose ownership is delegated.
 | `app` | `Text` | Required; either `jira` or `confluence`. |
 | `group_name` | `Text` | Original group name. |
 | `lower_group_name` | `Text` | Lowercase group name for unique constraint. |
-| `delegation_id` | `BigInteger` | Identifier from the source system. |
 
-**Constraints:** unique on (`app`, `lower_group_name`) via `uq_app_group` to avoid duplicate groups per product. 
+**Constraints:** unique on (`app`, `lower_group_name`) via `uq_app_group` to avoid duplicate groups per app. 
 
 **Relationships:** one-to-many with `dg_group_owner` via `DgManagedGroup.owners`.
 
@@ -202,6 +186,27 @@ Join table capturing delegated ownership of managed groups.
 
 ---
 
+#### `vw_delegated_group_owners`
+A read-only, flattened view providing a unified picture of:
+  - The delegated group
+  - The owning user(s)
+  - Ownership type
+  - Application (Jira/Confluence)
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `app` | `Text` | The application where the group exists. |
+| `delegated_group` | `Text` | The original group name. |
+| `delegated_group_lower` | `Text` | Lowercase group name for case-insensitive matching. |
+| `owner_username` | `Text` | Username of the owner. |
+| `owner_email` | `Text` | Email address of the owner (nullable). |
+| `owner_type` | `Text` | Indicates whether the owner is a `USER_OWNER` (directly assigned) or a `GROUP_OWNER` (via membership in another group). |
+| `via_group_name` | `Text` | Name of the group through which ownership is inherited. Null for direct user owners. |
+| `owner_created_at` | `DateTime(timezone=True)` | Timestamp when the ownership row was created. Defaults to `NOW()` on insert. |
+
+
+---
+
 >>> [!important] General Relationship Information
 - A user can own multiple groups (many-to-many relationship)
 - Relationships are modeled with cascading foreign keys to keep ownership records in sync when users or groups are removed
@@ -211,13 +216,14 @@ Join table capturing delegated ownership of managed groups.
 `tests/test_queries.py` contains two reusable helpers:
 - `get_my_groups(username)` returns each managed group a user owns along with the source type and any intermediary group. Results are ordered by application and group name.
 - `get_group_owners(app, group_name)` returns the owners of a specific group, ordered by source type, via-group, and username.
+- `get_all()` returns all delegated groups and their owners for Jira and Confluence.
 
 The module can be executed directly in the **CLI** for ad hoc inspection:
 
 ### Command-line Interface
 
 ```text
-usage: test_queries.py [-h] {my-groups,group-owners} ...
+usage: test_queries.py [-h] {all-owners,my-groups,group-owners} ...
 
 Query delegated groups and their owners from the PostgreSQL DB.
 
@@ -282,7 +288,13 @@ pip install -r delegated-groups/requirements.txt  # run from root (ops-utilities
 - Update the database connection parameters in `psql_models.py` if needed (dev vs. prod)
 
 ### 3. Import Data
-- Place CSV files (`effective_owners_jira.csv` and `effective_owners_conf.csv`) in the appropriate location
+- Execute the SQL queries in `sql/msql_queries.sql` via SQL Server Management Studio
+- Use `CTRL + SHIFT + C` to copy the result and the headers
+- For each application (Jira/Confluence), paste the data in an empty Excel file and save it as a `CSV UTF-8 (Comma delimited) (*.csv)` in `D:\PERSONAL_SPACE`
+  - Name the files accordingly: 
+    - `effective_owners_jira.csv` for Jira
+    - `effective_owners_conf.csv` for Confluence
+- Place CSV files (`effective_owners_jira.csv` and `effective_owners_conf.csv`) in the appropriate location (`zdrive`) using Secure File Transfer (S2)
 - Run the import script:
   ```bash
   # run from root (ops-utilities)
@@ -318,4 +330,3 @@ Execute test queries to verify functionality:
   python -m delegated-groups.tests.test_queries group-owners -a APP -g GROUP_NAME 
   ```
 </details>
-
