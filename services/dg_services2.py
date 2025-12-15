@@ -204,86 +204,66 @@ def sync_group_owners_for_delegated_group(
         cu.spacer()
         cu.rule()
 
+from typing import Iterable, Optional, Tuple, Callable
+from sqlalchemy.orm import Session
+
+from .psql_models import (
+    SessionLocal,
+    DgManagedGroup,
+    DgGroupOwner,
+    DgGroupOwnerGroup,  # NEW
+)
+
+# ... keep the rest of your file unchanged ...
+
 
 def sync_all_group_owners(
     fetch_members_for_group: Callable[[str, str], Iterable[Tuple[str, Optional[str]]]],
 ) -> None:
     """
     Run GROUP_OWNER membership reconciliation for *every* delegated group that
-    currently has GROUP_OWNER rows.
-
-    This is intended to be called from a scheduled job.
-
-    Arguments:
-    fetch_members_for_group(app, owning_group_name) -> iterable of (username, email)
-        - app: 'jira' or 'confluence'
-        - owning_group_name: the group stored in via_group_name
-        - returns the CURRENT members of that group in the source system
-        (Jira/Confluence), as (username, email) tuples.
-
-    Behavior:
-    1. Query dg_group_owner + dg_managed_group for all distinct
-        (app, delegated_group, via_group_name) where source_type='GROUP_OWNER'.
-    2. For each (app, delegated_group, via_group_name):
-        - call fetch_members_for_group(app, via_group_name)
-        - call sync_group_owners_for_delegated_group(...) with that member list.
+    has configured owning-groups in dg_group_owner_group.
     """
     cu.header("Starting sync_all_group_owners job")
-    # Step 1: collect all unique (app, delegated_group, via_group_name) combos
+
     with SessionLocal() as session:
         rows = (
             session.query(
                 DgManagedGroup.app,
                 DgManagedGroup.group_name,
-                DgGroupOwner.via_group_name,
+                DgGroupOwnerGroup.owning_group_name,
             )
             .join(
                 DgManagedGroup,
-                DgManagedGroup.id == DgGroupOwner.managed_group_id,
+                DgManagedGroup.id == DgGroupOwnerGroup.managed_group_id,
             )
-            .filter(DgGroupOwner.source_type == "GROUP_OWNER")
-            .filter(DgGroupOwner.via_group_name.isnot(None))
-            # .filter(
-            #     DgGroupOwner.via_group_name.in_(
-            #         ["jira-administrators", "confluence-administrators"]
-            #     )
-            # )
             .distinct()
             .all()
         )
-        cu.info(f" Found {len(rows)} delegated groups to process")
 
-    # Step 2: Optimize by caching members for each (app, via_group_name) combo
-    # to avoid redundant API calls
+        cu.info(f" Found {len(rows)} (delegated_group, owning_group) relationships to process")
+
+    # Cache: (app, owning_group_lower) -> member list
     app_group_cache: dict[Tuple[str, str], list[Tuple[str, Optional[str]]]] = {}
 
-    # Step 3: loop over each combo and reconcile membership
-    for app, delegated_group, via_group_name in rows:
-        if not via_group_name:
-            # Shouldn't happen because of filter, but be safe
+    for app, delegated_group, owning_group_name in rows:
+        if not owning_group_name:
             continue
 
-        # Check if we already fetched members for this app/via_group_name combo
-        cache_key = (app.lower(), via_group_name.lower())
+        cache_key = (app.lower(), owning_group_name.lower())
         if cache_key not in app_group_cache:
-            # Fetch and cache the members
-            members = list(fetch_members_for_group(app, via_group_name))
+            members = list(fetch_members_for_group(app, owning_group_name))
             app_group_cache[cache_key] = members
-            # cu.info(f" Fetched {len(members)} members for {app}/{via_group_name}")
         else:
-            # Use cached members
             members = app_group_cache[cache_key]
-            cu.spacer()
-            cu.info(f" Using cached members for {app}/{via_group_name}")
+            cu.info(f" Using cached members for {app}/{owning_group_name}")
 
-        # cu.info(f" Processing group: {delegated_group} (app: {app}, via: {via_group_name})")
-
-        # Re-use the existing sync logic for that one pair
         sync_group_owners_for_delegated_group(
             app=app,
             delegated_group=delegated_group,
-            owning_group_name=via_group_name,
+            owning_group_name=owning_group_name,
             members=members,
         )
 
     cu.event("Completed sync_all_group_owners job", level="SUCCESS")
+
