@@ -6,7 +6,7 @@ import csv
 from sqlalchemy import text
 
 from ..database import psql_models as models
-from ..database.psql_models import DgUser, DgManagedGroup, DgGroupOwner
+from ..database.psql_models import DgUser, DgManagedGroup, DgGroupOwner, schema
 from prettiprint import ConsoleUtils
 
 cu = ConsoleUtils(theme="dark", verbosity=2)
@@ -19,16 +19,14 @@ def read_csv_rows(path: str):
     """
     Read a CSV C file and normalize column values.
 
-    Expected columns (user_key removed):
-      app, delegation_id, group_name, lower_group_name,
-      user_name, email_address, source_type, via_group_name
-
-    delegation_id is ignored.
+    Expected columns:
+    app, group_name, lower_group_name,
+    user_name, email_address, source_type, via_group_name
     """
     rows = []
     with open(path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
-        cu.info(f"Reading {path} with columns: {reader.fieldnames}")
+        cu.info(f" Reading {path} with columns: {reader.fieldnames}")
 
         for row in reader:
             rows.append(
@@ -46,13 +44,13 @@ def read_csv_rows(path: str):
     return rows
 
 
-def create_or_replace_view(engine):
+def create_or_replace_view(engine, schema):
     """
     Drops any existing table/view named vw_delegated_group_owners and
     creates the correct view definition.
     """
-    VIEW_SQL = """
-    CREATE OR REPLACE VIEW "atlassian-admin.dev".vw_delegated_group_owners AS
+    VIEW_SQL = f"""
+    CREATE OR REPLACE VIEW "{schema}".vw_delegated_group_owners AS
     SELECT
         mg.app                              AS app,
         mg.group_name                       AS delegated_group,
@@ -65,29 +63,29 @@ def create_or_replace_view(engine):
         go.via_group_name                   AS via_group_name,
         go.created_at                       AS owner_created_at
 
-    FROM "atlassian-admin.dev".dg_group_owner AS go
-    JOIN "atlassian-admin.dev".dg_managed_group AS mg
+    FROM "{schema}".dg_group_owner AS go
+    JOIN "{schema}".dg_managed_group AS mg
         ON mg.id = go.managed_group_id
-    JOIN "atlassian-admin.dev".dg_user AS u
+    JOIN "{schema}".dg_user AS u
         ON u.id = go.user_id;
     """
 
     with engine.begin() as conn:
-        cu.warn(
-            'Dropping any TABLE named vw_delegated_group_owners (if exists)...'
+        cu.warning(
+            ' Dropping any TABLE named vw_delegated_group_owners (if exists)...'
         )
         conn.execute(
             text(
-                'DROP TABLE IF EXISTS "atlassian-admin.dev".vw_delegated_group_owners CASCADE;'
+                'DROP TABLE IF EXISTS "{schema}".vw_delegated_group_owners CASCADE;'
             )
         )
-        cu.warn('Dropping any VIEW named vw_delegated_group_owners (if exists)...')
+        cu.warning(' Dropping any VIEW named vw_delegated_group_owners (if exists)...')
         conn.execute(
             text(
-                'DROP VIEW IF EXISTS "atlassian-admin.dev".vw_delegated_group_owners CASCADE;'
+                'DROP VIEW IF EXISTS "{schema}".vw_delegated_group_owners CASCADE;'
             )
         )
-        cu.info("Creating view vw_delegated_group_owners...")
+        cu.info(" Creating view vw_delegated_group_owners...")
         conn.execute(text(VIEW_SQL))
 
     cu.success('View "vw_delegated_group_owners" recreated successfully.')
@@ -103,7 +101,7 @@ def import_all():
     for path in (CSV_PATH_JIRA, CSV_PATH_CONF):
         all_rows.extend(read_csv_rows(path))
 
-    cu.info(f"Total combined rows from Jira + Confluence: {len(all_rows)}")
+    cu.info(f" Total combined rows from Jira + Confluence: {len(all_rows)}")
 
     # 2) Build unique users (by identity) and unique groups (by app+lower_group_name)
     unique_users: OrderedDict[tuple, dict] = OrderedDict()   # (lower_username, lower_email_or_blank)
@@ -126,8 +124,8 @@ def import_all():
                 "group_name": r["group_name"],
             }
 
-    cu.info(f"Unique users (by identity): {len(unique_users)}")
-    cu.info(f"Unique groups: {len(unique_groups)}")
+    cu.info(f" Unique users (by identity): {len(unique_users)}")
+    cu.info(f" Unique groups: {len(unique_groups)}")
 
     session = models.SessionLocal()
     try:
@@ -158,7 +156,7 @@ def import_all():
             user_objs[identity] = user
             new_users += 1
 
-        cu.info(f"New users inserted: {new_users}")
+        cu.info(f" New users inserted: {new_users}")
 
         # 4) Insert / get groups (by app, lower_group_name)
         group_objs: dict[tuple, DgManagedGroup] = {}  # (app, lower_group_name) -> DgManagedGroup
@@ -181,7 +179,7 @@ def import_all():
             group_objs[(app, lower_group_name)] = g
             new_groups += 1
 
-        cu.info(f"New groups inserted: {new_groups}")
+        cu.info(f" New groups inserted: {new_groups}")
 
         session.flush()  # populate IDs for new rows
 
@@ -219,7 +217,7 @@ def import_all():
                 )
             )
 
-        cu.info(f"New ownership rows to insert: {len(owner_objs)}")
+        cu.info(f" New ownership rows to insert: {len(owner_objs)}")
         session.add_all(owner_objs)
         session.commit()
         cu.success(
@@ -229,7 +227,7 @@ def import_all():
         )
 
         # 6) (Re)create the view
-        create_or_replace_view(models.engine)
+        create_or_replace_view(models.engine, schema)
 
     finally:
         session.close()
