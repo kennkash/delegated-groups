@@ -35,3 +35,15 @@ async def fetch_user(*, request: Request) -> ORJSONResponse:
     """
     result = await EmployeeService.get(request=request)
     return result
+
+
+
+current_user = await fetch_user(request=request)
+    admin_user = current_user.body
+    admin_user_str = admin_user.decode('utf-8')
+    
+    # Parse the JSON string to a dictionary
+    admin_user_json = json.loads(admin_user_str)
+    
+    # Extract the value of "nt_id"
+    nt_id = admin_user_json.get("nt_id", "default_nt_id")
