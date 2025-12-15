@@ -329,6 +329,13 @@ async def find_groups_by_email(
     req: FindGroupsByEmailRequest,
     db: Session = Depends(get_db),
 ):
+ """
+    Returns the groups the *current requester* is an effective owner of,
+    using smtp (email) resolved from EmployeeService via request headers.
+
+    No payload required.
+    """
+    
     user = db.query(DgUser).filter(DgUser.lower_email == req.email.lower()).one_or_none()
     if not user:
         return []
