@@ -12,27 +12,58 @@ from prettiprint import ConsoleUtils
 from .dg_services import sync_all_group_owners
 from .tokens import AtlassianToken
 
+# NEW: import engine + schema from your DB models
+from .psql_models import engine, schema  # adjust if your module path differs
+
+from sqlalchemy import text
+
 cu = ConsoleUtils(theme="dark", verbosity=2)
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-# These should be your Jira + Confluence base URLs *ending with* `/rest/`
-# so that `base_url + "api/..."` matches your examples.
 JIRA_BASE_URL = "http://jira.externalapi.smartcloud.samsungaustin.com/rest/"
 CONF_BASE_URL = "http://confluence.externalapi.smartcloud.samsungaustin.com/rest/"
-
-# Rate limiting: 1 request/sec, 60/min
 REQUEST_SLEEP_SECONDS = 1.05
 
 
 def _get_auth_header(app: str) -> dict:
-    """
-    Get Authorization header for the given app using your existing token helper.
-    """
     token = AtlassianToken(app).getCreds()
     return {"Authorization": f"Bearer {token}"}
+
+
+# ---------------------------------------------------------------------------
+# NEW: Backfill dg_group_owner_group from existing GROUP_OWNER rows
+# ---------------------------------------------------------------------------
+
+def backfill_group_owner_rules() -> None:
+    """
+    One-time (but safe to run every time) backfill:
+
+    Populate dg_group_owner_group using distinct (managed_group_id, via_group_name)
+    found in dg_group_owner where source_type='GROUP_OWNER'.
+
+    This ensures refresh can sync group ownership even if the API hasn't created
+    dg_group_owner_group rows yet.
+    """
+    sql = text(f"""
+        INSERT INTO "{schema}".dg_group_owner_group
+            (managed_group_id, owning_group_name, lower_owning_group_name)
+        SELECT DISTINCT
+            go.managed_group_id,
+            go.via_group_name,
+            lower(go.via_group_name)
+        FROM "{schema}".dg_group_owner go
+        WHERE go.source_type = 'GROUP_OWNER'
+          AND go.via_group_name IS NOT NULL
+        ON CONFLICT (managed_group_id, lower_owning_group_name) DO NOTHING;
+    """)
+
+    cu.header("Backfilling dg_group_owner_group from dg_group_owner (GROUP_OWNER rows)")
+    with engine.begin() as conn:
+        conn.execute(sql)
+    cu.event("Backfill complete (idempotent)", level="SUCCESS")
 
 
 # ---------------------------------------------------------------------------
@@ -40,13 +71,6 @@ def _get_auth_header(app: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def fetch_all_confluence_emails() -> Dict[str, Optional[str]]:
-    """
-    Fetch all active Confluence users and emails using:
-      /rest/scriptrunner/latest/custom/getAllEmails
-
-    Returns:
-      dict[lower_username -> email]
-    """
     headers = _get_auth_header("confluence")
     session = get_external_api_session()
 
@@ -82,17 +106,6 @@ def fetch_all_confluence_emails() -> Dict[str, Optional[str]]:
 # ---------------------------------------------------------------------------
 
 def _fetch_jira_group_members(group: str) -> List[Tuple[str, Optional[str]]]:
-    """
-    Fetch Jira group members via:
-      GET /rest/api/2/group/member?groupname=<group>&includeInactiveUsers=false
-
-    Returns:
-      list of (username, email) tuples
-
-    Jira response:
-      - name = username
-      - emailAddress = email
-    """
     headers = _get_auth_header("jira")
     session = get_external_api_session()
 
@@ -149,15 +162,6 @@ def _fetch_confluence_group_members(
     group: str,
     email_map: Dict[str, Optional[str]],
 ) -> List[Tuple[str, Optional[str]]]:
-    """
-    Fetch Confluence group members via:
-      GET /rest/api/group/{group}/member?limit=<limit>&start=<start>
-
-    Then enrich email via email_map from getAllEmails.
-
-    Returns:
-      list of (username, email) tuples
-    """
     headers = _get_auth_header("confluence")
     session = get_external_api_session()
 
@@ -213,16 +217,6 @@ def fetch_members_for_group(
     owning_group_name: str,
     confluence_email_map: Dict[str, Optional[str]],
 ) -> Iterable[Tuple[str, Optional[str]]]:
-    """
-    Adapter function used by sync_all_group_owners().
-
-    Given:
-      app: 'jira' or 'confluence'
-      owning_group_name: group to fetch members for
-
-    Returns:
-      iterable of (username, email)
-    """
     app = app.lower()
 
     cu.header("Fetching members for")
@@ -243,17 +237,15 @@ def fetch_members_for_group(
 # ---------------------------------------------------------------------------
 
 def main():
-    """
-    Scheduled job entrypoint.
-
-    - Fetch Confluence email map once per run.
-    - For every configured owning-group relationship in the DB:
-      - Fetch members from Jira/Confluence REST APIs
-      - Reconcile membership-expanded GROUP_OWNER rows
-    """
     cu.header("Starting refresh job")
 
-    # Fetch the Confluence email map once (per run)
+    # -----------------------------------------------------------------------
+    # PUT IT HERE:
+    # Backfill dg_group_owner_group once (safe to run every time)
+    # -----------------------------------------------------------------------
+    backfill_group_owner_rules()
+
+    # Fetch the Confluence email map once per run
     confluence_email_map = fetch_all_confluence_emails()
 
     def wrapped_fetch(app: str, owning_group_name: str):
@@ -266,24 +258,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    from sqlalchemy import text
-
-def backfill_group_owner_rules(engine, schema: str) -> int:
-    sql = text(f"""
-        INSERT INTO "{schema}".dg_group_owner_group
-            (managed_group_id, owning_group_name, lower_owning_group_name)
-        SELECT DISTINCT
-            go.managed_group_id,
-            go.via_group_name,
-            lower(go.via_group_name)
-        FROM "{schema}".dg_group_owner go
-        WHERE go.source_type = 'GROUP_OWNER'
-          AND go.via_group_name IS NOT NULL
-        ON CONFLICT (managed_group_id, lower_owning_group_name) DO NOTHING;
-    """)
-
-    with engine.begin() as conn:
-        result = conn.execute(sql)
-        # result.rowcount is not always reliable with INSERT..SELECT in pg,
-        # but it's fine to log it if it returns something.
-        return getattr(result, "rowcount", -1)
