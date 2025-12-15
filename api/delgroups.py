@@ -1,11 +1,15 @@
+# api/delegated_groups_api.py
+
 from __future__ import annotations
 
-from typing import List, Optional, Dict, Any
+import json
+from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Depends, Header
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-
 from sqlalchemy.orm import Session
+
+from services.v0.user import EmployeeService
 
 from .database.psql_models import (
     SessionLocal,
@@ -31,35 +35,27 @@ def get_db():
 
 
 # ---------------------------------------------------------------------------
-# "Current user" dependency (wire this to your real auth)
+# Current identity dependency (EMAIL ONLY)
 # ---------------------------------------------------------------------------
 
-class CurrentIdentity(BaseModel):
-    username: Optional[str] = None
-    email: Optional[str] = None
-
-
-def get_current_identity(
-    # Example placeholders: replace with your actual auth integration.
-    # You can also remove these headers and instead decode JWT/session, etc.
-    x_user: Optional[str] = Header(default=None, alias="X-User"),
-    x_email: Optional[str] = Header(default=None, alias="X-Email"),
-) -> CurrentIdentity:
+async def get_current_email(request: Request) -> str:
     """
-    Replace this with your real identity provider.
+    Returns the requester's email address using EmployeeService.get(request=request).
 
-    For now it supports:
-      - X-User: username
-      - X-Email: email
-
-    Your UI/backend can send one or both.
+    Expects EmployeeService payload to include: {"smtp": "<email>"}
     """
-    if not x_user and not x_email:
-        raise HTTPException(
-            status_code=401,
-            detail="Missing identity (provide X-User and/or X-Email, or wire real auth).",
-        )
-    return CurrentIdentity(username=x_user, email=x_email)
+    resp = await EmployeeService.get(request=request)
+
+    try:
+        payload = json.loads(resp.body.decode("utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unable to parse current user payload: {e}")
+
+    email = payload.get("smtp")
+    if not email:
+        raise HTTPException(status_code=401, detail="Missing smtp/email in current user identity payload.")
+
+    return email.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -96,10 +92,17 @@ class FindGroupsByEmailRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helper utilities
 # ---------------------------------------------------------------------------
 
 def get_or_create_user(db: Session, username: str, email: Optional[str]) -> DgUser:
+    """
+    Upsert-ish user creation based on your unique identity constraint:
+    (lower_username, lower_email).
+
+    Note: If email is None, this will create a (username, NULL) identity row.
+    Prefer providing email whenever possible to avoid duplicates.
+    """
     lower_username = username.lower()
     lower_email = email.lower() if email else None
 
@@ -136,55 +139,36 @@ def get_managed_group(db: Session, app: str, group_name: str) -> DgManagedGroup:
     return group
 
 
-def resolve_requester_user_id(db: Session, ident: CurrentIdentity) -> int:
-    """
-    Find the current requester in dg_user.
-
-    Priority:
-      1) match by lower_email if provided
-      2) match by lower_username if provided
-
-    This does NOT create a user.
-    If the requester isn't in dg_user yet, they can't be an owner in this system.
-    """
-    if ident.email:
-        u = db.query(DgUser).filter(DgUser.lower_email == ident.email.lower()).one_or_none()
-        if u:
-            return u.id
-
-    if ident.username:
-        u = db.query(DgUser).filter(DgUser.lower_username == ident.username.lower()).one_or_none()
-        if u:
-            return u.id
-
-    raise HTTPException(
-        status_code=403,
-        detail="Requester not found in delegated-groups user table; cannot verify ownership.",
-    )
-
-
-def require_owner_of_group(
+def require_owner_by_email(
     db: Session,
-    ident: CurrentIdentity,
+    requester_email: str,
     app: str,
     group_name: str,
 ) -> DgManagedGroup:
     """
-    Permission check: requester must be an *effective owner* of (app, group_name).
-
-    Effective owner means they have a row in dg_group_owner for that managed_group_id,
-    regardless of whether it is USER_OWNER or GROUP_OWNER.
+    Permission check:
+    - requester is identified only by email (smtp)
+    - requester must be an effective owner of (app, group_name)
     """
     managed_group = get_managed_group(db, app, group_name)
-    requester_user_id = resolve_requester_user_id(db, ident)
+
+    requester = (
+        db.query(DgUser)
+        .filter(DgUser.lower_email == requester_email)
+        .one_or_none()
+    )
+    if not requester:
+        raise HTTPException(
+            status_code=403,
+            detail="Requester not found in dg_user by email; cannot verify ownership yet.",
+        )
 
     is_owner = (
         db.query(DgGroupOwner.id)
         .filter(DgGroupOwner.managed_group_id == managed_group.id)
-        .filter(DgGroupOwner.user_id == requester_user_id)
+        .filter(DgGroupOwner.user_id == requester.id)
         .first()
     )
-
     if not is_owner:
         raise HTTPException(
             status_code=403,
@@ -199,16 +183,16 @@ def require_owner_of_group(
 # ---------------------------------------------------------------------------
 
 @router.post("/owners/user")
-def add_user_owner(
+async def add_user_owner(
     req: UserOwnerRequest,
-    ident: CurrentIdentity = Depends(get_current_identity),
+    requester_email: str = Depends(get_current_email),
     db: Session = Depends(get_db),
 ):
     """
     Add a USER_OWNER to an existing delegated group.
-    Permission: requester must already be an owner of that delegated group.
+    Permission: requester must already be an owner (by effective ownership).
     """
-    managed_group = require_owner_of_group(db, ident, req.app, req.group_name)
+    managed_group = require_owner_by_email(db, requester_email, req.app, req.group_name)
 
     user = get_or_create_user(db, req.username, req.email)
 
@@ -238,18 +222,17 @@ def add_user_owner(
 
 
 @router.delete("/owners/user")
-def remove_user_owner(
+async def remove_user_owner(
     req: UserOwnerRequest,
-    ident: CurrentIdentity = Depends(get_current_identity),
+    requester_email: str = Depends(get_current_email),
     db: Session = Depends(get_db),
 ):
     """
     Remove a USER_OWNER from a delegated group.
-    Permission: requester must already be an owner of that delegated group.
+    Permission: requester must already be an owner (by effective ownership).
     """
-    managed_group = require_owner_of_group(db, ident, req.app, req.group_name)
+    managed_group = require_owner_by_email(db, requester_email, req.app, req.group_name)
 
-    # Find the target user row (by username primarily; email optional)
     q = db.query(DgUser).filter(DgUser.lower_username == req.username.lower())
     if req.email:
         q = q.filter(DgUser.lower_email == req.email.lower())
@@ -273,17 +256,17 @@ def remove_user_owner(
 
 
 @router.post("/owners/group")
-def add_group_owner(
+async def add_group_owner(
     req: GroupOwnerRequest,
-    ident: CurrentIdentity = Depends(get_current_identity),
+    requester_email: str = Depends(get_current_email),
     db: Session = Depends(get_db),
 ):
     """
     Add a GROUP_OWNER rule (does NOT expand members here).
     Refresh job will expand membership into dg_group_owner rows.
-    Permission: requester must already be an owner of that delegated group.
+    Permission: requester must already be an owner (by effective ownership).
     """
-    managed_group = require_owner_of_group(db, ident, req.app, req.group_name)
+    managed_group = require_owner_by_email(db, requester_email, req.app, req.group_name)
 
     exists = (
         db.query(DgGroupOwnerGroup)
@@ -304,23 +287,24 @@ def add_group_owner(
         )
     )
     db.commit()
+
     return {"status": "group owner added (refresh will expand members)"}
 
 
 @router.delete("/owners/group")
-def remove_group_owner(
+async def remove_group_owner(
     req: GroupOwnerRequest,
-    ident: CurrentIdentity = Depends(get_current_identity),
+    requester_email: str = Depends(get_current_email),
     db: Session = Depends(get_db),
 ):
     """
     Remove a GROUP_OWNER rule (all-or-nothing) and delete all expanded membership rows
     for that owning group.
-    Permission: requester must already be an owner of that delegated group.
+    Permission: requester must already be an owner (by effective ownership).
     """
-    managed_group = require_owner_of_group(db, ident, req.app, req.group_name)
+    managed_group = require_owner_by_email(db, requester_email, req.app, req.group_name)
 
-    # 1) delete expanded GROUP_OWNER user rows
+    # 1) delete expanded GROUP_OWNER user rows for this via_group_name
     expanded_deleted = (
         db.query(DgGroupOwner)
         .filter(
@@ -342,7 +326,10 @@ def remove_group_owner(
     )
 
     db.commit()
-    return {"removed_group_rule_rows": rule_deleted, "removed_expanded_owner_rows": expanded_deleted}
+    return {
+        "removed_group_rule_rows": rule_deleted,
+        "removed_expanded_owner_rows": expanded_deleted,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +337,7 @@ def remove_group_owner(
 # ---------------------------------------------------------------------------
 
 @router.post("/groups")
-def create_group_with_owners(
+async def create_group_with_owners(
     req: NewGroupRequest,
     db: Session = Depends(get_db),
 ):
@@ -362,7 +349,6 @@ def create_group_with_owners(
     app = req.app.lower()
     lower_group_name = req.group_name.lower()
 
-    # Prevent duplicates within the same app (matches uq_app_group)
     exists = (
         db.query(DgManagedGroup.id)
         .filter(DgManagedGroup.app == app)
@@ -407,7 +393,7 @@ def create_group_with_owners(
 
 
 @router.post("/my-groups")
-def find_groups_by_email(
+async def find_groups_by_email(
     req: FindGroupsByEmailRequest,
     db: Session = Depends(get_db),
 ):
