@@ -17,8 +17,6 @@ CSV_PATH_CONF = "/mnt/k.kashmiry/zdrive/effective_owners_conf.csv"
 
 def read_csv_rows(path: str):
     """
-    Read a CSV C file and normalize column values.
-
     Expected columns:
     app, group_name, lower_group_name,
     user_name, email_address, source_type, via_group_name
@@ -44,12 +42,12 @@ def read_csv_rows(path: str):
     return rows
 
 
-def create_or_replace_view(engine, schema):
+def create_or_replace_views(engine, schema: str):
     """
-    Drops any existing table/view named vw_delegated_group_owners and
-    creates the correct view definition.
+    Drops any existing table/view with the target names and recreates them.
     """
-    VIEW_SQL = f"""
+
+    VIEW_EFFECTIVE_OWNERS = f"""
     CREATE OR REPLACE VIEW "{schema}".vw_delegated_group_owners AS
     SELECT
         mg.app                              AS app,
@@ -62,7 +60,6 @@ def create_or_replace_view(engine, schema):
         go.source_type                      AS owner_type,
         go.via_group_name                   AS via_group_name,
         go.created_at                       AS owner_created_at
-
     FROM "{schema}".dg_group_owner AS go
     JOIN "{schema}".dg_managed_group AS mg
         ON mg.id = go.managed_group_id
@@ -70,30 +67,42 @@ def create_or_replace_view(engine, schema):
         ON u.id = go.user_id;
     """
 
-    with engine.begin() as conn:
-        cu.warning(
-            ' Dropping any TABLE named vw_delegated_group_owners (if exists)...'
-        )
-        conn.execute(
-            text(
-                'DROP TABLE IF EXISTS "{schema}".vw_delegated_group_owners CASCADE;'
-            )
-        )
-        cu.warning(' Dropping any VIEW named vw_delegated_group_owners (if exists)...')
-        conn.execute(
-            text(
-                'DROP VIEW IF EXISTS "{schema}".vw_delegated_group_owners CASCADE;'
-            )
-        )
-        cu.info(" Creating view vw_delegated_group_owners...")
-        conn.execute(text(VIEW_SQL))
+    VIEW_OWNER_GROUPS = f"""
+    CREATE OR REPLACE VIEW "{schema}".vw_delegated_group_owner_groups AS
+    SELECT
+        mg.app                              AS app,
+        mg.group_name                       AS delegated_group,
+        mg.lower_group_name                 AS delegated_group_lower,
 
-    cu.success('View "vw_delegated_group_owners" recreated successfully.')
+        og.owning_group_name                AS owning_group_name,
+        og.lower_owning_group_name          AS owning_group_lower,
+
+        og.created_at                       AS created_at
+    FROM "{schema}".dg_group_owner_group AS og
+    JOIN "{schema}".dg_managed_group AS mg
+        ON mg.id = og.managed_group_id;
+    """
+
+    with engine.begin() as conn:
+        # Defensive: remove if someone accidentally created as TABLE previously
+        for name in ("vw_delegated_group_owners", "vw_delegated_group_owner_groups"):
+            cu.warning(f' Dropping any TABLE named {name} (if exists)...')
+            conn.execute(text(f'DROP TABLE IF EXISTS "{schema}".{name} CASCADE;'))
+            cu.warning(f' Dropping any VIEW named {name} (if exists)...')
+            conn.execute(text(f'DROP VIEW IF EXISTS "{schema}".{name} CASCADE;'))
+
+        cu.info(" Creating view vw_delegated_group_owners...")
+        conn.execute(text(VIEW_EFFECTIVE_OWNERS))
+
+        cu.info(" Creating view vw_delegated_group_owner_groups...")
+        conn.execute(text(VIEW_OWNER_GROUPS))
+
+    cu.success("Views recreated successfully.")
 
 
 def import_all():
     """
-    Imports Jira and Confluence CSVs into the PostgreSQL tables and recreates the view.
+    Imports Jira and Confluence CSVs into the PostgreSQL tables and recreates the views.
     """
 
     # 1) Load all rows from both CSVs
@@ -132,7 +141,6 @@ def import_all():
         # 3) Insert / get users, deduped by identity
         user_objs: dict[tuple, DgUser] = {}  # identity -> DgUser
 
-        # Preload existing users from DB
         existing_users = session.query(DgUser).all()
         for u in existing_users:
             identity = (u.lower_username, (u.lower_email or "").lower())
@@ -161,7 +169,6 @@ def import_all():
         # 4) Insert / get groups (by app, lower_group_name)
         group_objs: dict[tuple, DgManagedGroup] = {}  # (app, lower_group_name) -> DgManagedGroup
 
-        # Preload existing groups
         for g in session.query(DgManagedGroup).all():
             group_objs[(g.app, g.lower_group_name)] = g
 
@@ -181,7 +188,7 @@ def import_all():
 
         cu.info(f" New groups inserted: {new_groups}")
 
-        session.flush()  # populate IDs for new rows
+        session.flush()
 
         # 5) Insert ownership rows, deduped across all rows
         seen_owner_keys = set(
@@ -220,14 +227,15 @@ def import_all():
         cu.info(f" New ownership rows to insert: {len(owner_objs)}")
         session.add_all(owner_objs)
         session.commit()
+
         cu.success(
             f"Import complete. Total users: {len(user_objs)}, "
             f"total groups: {len(group_objs)}, "
             f"total ownership keys: {len(seen_owner_keys)}"
         )
 
-        # 6) (Re)create the view
-        create_or_replace_view(models.engine, schema)
+        # 6) (Re)create the views
+        create_or_replace_views(models.engine, schema)
 
     finally:
         session.close()
