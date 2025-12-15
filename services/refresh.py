@@ -266,3 +266,24 @@ def main():
 
 if __name__ == "__main__":
     main()
+    from sqlalchemy import text
+
+def backfill_group_owner_rules(engine, schema: str) -> int:
+    sql = text(f"""
+        INSERT INTO "{schema}".dg_group_owner_group
+            (managed_group_id, owning_group_name, lower_owning_group_name)
+        SELECT DISTINCT
+            go.managed_group_id,
+            go.via_group_name,
+            lower(go.via_group_name)
+        FROM "{schema}".dg_group_owner go
+        WHERE go.source_type = 'GROUP_OWNER'
+          AND go.via_group_name IS NOT NULL
+        ON CONFLICT (managed_group_id, lower_owning_group_name) DO NOTHING;
+    """)
+
+    with engine.begin() as conn:
+        result = conn.execute(sql)
+        # result.rowcount is not always reliable with INSERT..SELECT in pg,
+        # but it's fine to log it if it returns something.
+        return getattr(result, "rowcount", -1)
