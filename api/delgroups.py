@@ -1,15 +1,12 @@
-# api/delegated_groups_api.py
-
 from __future__ import annotations
 
-import json
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from services.v0.user import EmployeeService
+from api.v0.deps.current_user import get_current_email  # <-- USE THE DEP
 
 from .database.psql_models import (
     SessionLocal,
@@ -32,30 +29,6 @@ def get_db():
         yield db
     finally:
         db.close()
-
-
-# ---------------------------------------------------------------------------
-# Current identity dependency (EMAIL ONLY)
-# ---------------------------------------------------------------------------
-
-async def get_current_email(request: Request) -> str:
-    """
-    Returns the requester's email address using EmployeeService.get(request=request).
-
-    Expects EmployeeService payload to include: {"smtp": "<email>"}
-    """
-    resp = await EmployeeService.get(request=request)
-
-    try:
-        payload = json.loads(resp.body.decode("utf-8"))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unable to parse current user payload: {e}")
-
-    email = payload.get("smtp")
-    if not email:
-        raise HTTPException(status_code=401, detail="Missing smtp/email in current user identity payload.")
-
-    return email.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +57,7 @@ class NewGroupRequest(BaseModel):
     app: str
     group_name: str
     user_owners: List[NewGroupUserOwner] = []
-    group_owners: List[str] = []  # list of owning_group_names
+    group_owners: List[str] = []
 
 
 class FindGroupsByEmailRequest(BaseModel):
@@ -92,17 +65,10 @@ class FindGroupsByEmailRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Helper utilities
+# Helpers
 # ---------------------------------------------------------------------------
 
 def get_or_create_user(db: Session, username: str, email: Optional[str]) -> DgUser:
-    """
-    Upsert-ish user creation based on your unique identity constraint:
-    (lower_username, lower_email).
-
-    Note: If email is None, this will create a (username, NULL) identity row.
-    Prefer providing email whenever possible to avoid duplicates.
-    """
     lower_username = username.lower()
     lower_email = email.lower() if email else None
 
@@ -145,11 +111,6 @@ def require_owner_by_email(
     app: str,
     group_name: str,
 ) -> DgManagedGroup:
-    """
-    Permission check:
-    - requester is identified only by email (smtp)
-    - requester must be an effective owner of (app, group_name)
-    """
     managed_group = get_managed_group(db, app, group_name)
 
     requester = (
@@ -188,12 +149,7 @@ async def add_user_owner(
     requester_email: str = Depends(get_current_email),
     db: Session = Depends(get_db),
 ):
-    """
-    Add a USER_OWNER to an existing delegated group.
-    Permission: requester must already be an owner (by effective ownership).
-    """
     managed_group = require_owner_by_email(db, requester_email, req.app, req.group_name)
-
     user = get_or_create_user(db, req.username, req.email)
 
     exists = (
@@ -227,10 +183,6 @@ async def remove_user_owner(
     requester_email: str = Depends(get_current_email),
     db: Session = Depends(get_db),
 ):
-    """
-    Remove a USER_OWNER from a delegated group.
-    Permission: requester must already be an owner (by effective ownership).
-    """
     managed_group = require_owner_by_email(db, requester_email, req.app, req.group_name)
 
     q = db.query(DgUser).filter(DgUser.lower_username == req.username.lower())
@@ -261,11 +213,6 @@ async def add_group_owner(
     requester_email: str = Depends(get_current_email),
     db: Session = Depends(get_db),
 ):
-    """
-    Add a GROUP_OWNER rule (does NOT expand members here).
-    Refresh job will expand membership into dg_group_owner rows.
-    Permission: requester must already be an owner (by effective ownership).
-    """
     managed_group = require_owner_by_email(db, requester_email, req.app, req.group_name)
 
     exists = (
@@ -287,7 +234,6 @@ async def add_group_owner(
         )
     )
     db.commit()
-
     return {"status": "group owner added (refresh will expand members)"}
 
 
@@ -297,14 +243,8 @@ async def remove_group_owner(
     requester_email: str = Depends(get_current_email),
     db: Session = Depends(get_db),
 ):
-    """
-    Remove a GROUP_OWNER rule (all-or-nothing) and delete all expanded membership rows
-    for that owning group.
-    Permission: requester must already be an owner (by effective ownership).
-    """
     managed_group = require_owner_by_email(db, requester_email, req.app, req.group_name)
 
-    # 1) delete expanded GROUP_OWNER user rows for this via_group_name
     expanded_deleted = (
         db.query(DgGroupOwner)
         .filter(
@@ -315,7 +255,6 @@ async def remove_group_owner(
         .delete(synchronize_session=False)
     )
 
-    # 2) delete the rule row
     rule_deleted = (
         db.query(DgGroupOwnerGroup)
         .filter(
@@ -341,11 +280,6 @@ async def create_group_with_owners(
     req: NewGroupRequest,
     db: Session = Depends(get_db),
 ):
-    """
-    Create a new delegated group and assign initial user + group owners.
-
-    Permission: OPEN (anyone can create a new group).
-    """
     app = req.app.lower()
     lower_group_name = req.group_name.lower()
 
@@ -366,7 +300,6 @@ async def create_group_with_owners(
     db.add(group)
     db.flush()
 
-    # USER owners (direct)
     for u in req.user_owners:
         user = get_or_create_user(db, u.username, u.email)
         db.add(
@@ -378,7 +311,6 @@ async def create_group_with_owners(
             )
         )
 
-    # GROUP owners (rules only; refresh expands members)
     for owning_group in req.group_owners:
         db.add(
             DgGroupOwnerGroup(
@@ -397,12 +329,6 @@ async def find_groups_by_email(
     req: FindGroupsByEmailRequest,
     db: Session = Depends(get_db),
 ):
-    """
-    Takes in a user's email and returns the groups they are an effective owner of
-    for each application.
-
-    Permission: OPEN.
-    """
     user = db.query(DgUser).filter(DgUser.lower_email == req.email.lower()).one_or_none()
     if not user:
         return []
@@ -424,8 +350,8 @@ async def find_groups_by_email(
         {
             "app": app,
             "group_name": group_name,
-            "ownership_type": source_type,     # USER_OWNER or GROUP_OWNER
-            "via_group_name": via_group_name,  # owning group for GROUP_OWNER, else null
+            "ownership_type": source_type,
+            "via_group_name": via_group_name,
         }
         for app, group_name, source_type, via_group_name in rows
     ]
