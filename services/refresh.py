@@ -176,48 +176,29 @@ def _fetch_confluence_group_members(group: str) -> List[Tuple[str, Optional[str]
 # Adapter used by dg_service.sync_all_group_owners
 # ---------------------------------------------------------------------------
 
-def fetch_members_for_group(
-    app: str,
-    owning_group_name: str,
-) -> Iterable[Tuple[str, Optional[str]]]:
-    """
-    Adapter function passed into sync_all_group_owners().
-
-    Given:
-    app: 'jira' or 'confluence'
-    owning_group_name: value stored in via_group_name
-
-    Returns:
-    iterable of (username, email) for current members of that group.
-
-    This function chooses the correct REST API based on app.
-    """
+def fetch_members_for_group(app: str, owning_group_name: str, email_map: dict[str, Optional[str]]):
     app = app.lower()
-    dict = {"app": f"{app}", "group": f"{owning_group_name}"}
-    cu.header("Fetching members for:")
-    cu.dictionary(dict, expand=False)
     if app == "jira":
         return _fetch_jira_group_members(owning_group_name)
-    elif app == "confluence":
-        return _fetch_confluence_group_members(owning_group_name)
-    else:
-        cu.warning(f"[WARN] Unknown app '{app}' in fetch_members_for_group; returning empty list.")
-        return []
+    if app == "confluence":
+        return _fetch_confluence_group_members(owning_group_name, email_map)
+    cu.warning(f"[WARN] Unknown app '{app}'")
+    return []
+
 
 # ---------------------------------------------------------------------------
 # Main entrypoint for scheduler
 # ---------------------------------------------------------------------------
 
 def main():
-    """
-    Scheduled job entrypoint.
-
-    - Finds all (app, delegated_group, via_group_name) with GROUP_OWNER rows.
-    - For each, calls the appropriate REST API to get CURRENT group membership.
-    - Reconciles dg_group_owner rows using sync_group_owners_for_delegated_group().
-    """
     cu.header("Starting main refresh job")
-    sync_all_group_owners(fetch_members_for_group)
+
+    email_map = fetch_all_confluence_emails()
+
+    def wrapped_fetch(app: str, owning_group_name: str):
+        return fetch_members_for_group(app, owning_group_name, email_map)
+
+    sync_all_group_owners(wrapped_fetch)
     cu.event("Completed main refresh job", level="SUCCESS")
 
 if __name__ == "__main__":
