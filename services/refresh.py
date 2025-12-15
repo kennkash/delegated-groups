@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import time
 import urllib.parse
-from typing import Iterable, Tuple, Optional, List
+from typing import Iterable, Tuple, Optional, List, Dict
 
 from sas_auth_wrapper import get_external_api_session
+from prettiprint import ConsoleUtils
 
 from .dg_services import sync_all_group_owners
 from .tokens import AtlassianToken
 
-from prettiprint import ConsoleUtils
-
 cu = ConsoleUtils(theme="dark", verbosity=2)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -30,15 +30,51 @@ REQUEST_SLEEP_SECONDS = 1.05
 def _get_auth_header(app: str) -> dict:
     """
     Get Authorization header for the given app using your existing token helper.
-
-    Assumes:
-    AtlassianToken(app).getCreds() -> returns a bearer token/password.
-
-    If you instead have an async getCreds(app), you could adapt this script
-    to be async and use asyncio.run(...) at the bottom.
     """
     token = AtlassianToken(app).getCreds()
     return {"Authorization": f"Bearer {token}"}
+
+
+# ---------------------------------------------------------------------------
+# One-time per run: Confluence email map via ScriptRunner
+# ---------------------------------------------------------------------------
+
+def fetch_all_confluence_emails() -> Dict[str, Optional[str]]:
+    """
+    Fetch all active Confluence users and emails using:
+      /rest/scriptrunner/latest/custom/getAllEmails
+
+    Returns:
+      dict[lower_username -> email]
+    """
+    headers = _get_auth_header("confluence")
+    session = get_external_api_session()
+
+    url = f"{CONF_BASE_URL}scriptrunner/latest/custom/getAllEmails"
+    cu.header("Fetching Confluence email map (getAllEmails)")
+
+    resp = session.get(url, headers=headers)
+    time.sleep(REQUEST_SLEEP_SECONDS)
+
+    if resp.status_code != 200:
+        cu.error(
+            f"[Confluence] Failed to fetch getAllEmails "
+            f"(status={resp.status_code}): {resp.text[:200]}"
+        )
+        return {}
+
+    data = resp.json() or []
+
+    email_map: Dict[str, Optional[str]] = {}
+    for entry in data:
+        lower_username = entry.get("lower_username")
+        email = entry.get("email")
+        if not lower_username:
+            continue
+        email_map[lower_username.lower()] = email
+
+    cu.event(f"Loaded {len(email_map)} email entries from getAllEmails", level="SUCCESS")
+    return email_map
 
 
 # ---------------------------------------------------------------------------
@@ -48,36 +84,33 @@ def _get_auth_header(app: str) -> dict:
 def _fetch_jira_group_members(group: str) -> List[Tuple[str, Optional[str]]]:
     """
     Fetch Jira group members via:
-    GET /rest/api/2/group/member?groupname=<group>&includeInactiveUsers=false
+      GET /rest/api/2/group/member?groupname=<group>&includeInactiveUsers=false
 
     Returns:
-    list of (username, email) tuples
+      list of (username, email) tuples
 
-    In Jira's response:
-    - name = username
-    - emailAddress = email (may be null/omitted)
+    Jira response:
+      - name = username
+      - emailAddress = email
     """
     headers = _get_auth_header("jira")
     session = get_external_api_session()
 
     encoded_group = urllib.parse.quote(group, safe="")
-    # base path without pagination params
     api_path = (
         f"{JIRA_BASE_URL}api/2/group/member"
         f"?groupname={encoded_group}&includeInactiveUsers=false"
     )
 
     members: List[Tuple[str, Optional[str]]] = []
-
     limit = 50
     start_at = 0
 
-    cu.header(f"Starting Jira group members fetch for group: {group}")
+    cu.header(f"Fetching Jira members for group: {group}")
+
     while True:
         url = f"{api_path}&maxResults={limit}&startAt={start_at}"
         resp = session.get(url, headers=headers)
-
-        # respect rate limit: 1 req/sec
         time.sleep(REQUEST_SLEEP_SECONDS)
 
         if resp.status_code != 200:
@@ -91,39 +124,39 @@ def _fetch_jira_group_members(group: str) -> List[Tuple[str, Optional[str]]]:
         values = data.get("values", []) or []
 
         for user in values:
-            username = user.get("name")  # Jira DC username
+            username = user.get("name")
             email = user.get("emailAddress")
             if username:
                 members.append((username, email))
 
-        # Pagination: use isLast to decide if done
-        is_last = data.get("isLast", True)
-        if is_last:
-            cu.event(f" Finished Jira group members fetch for group: {group}. Found {len(members)} members.", level="SUCCESS")
+        if data.get("isLast", True):
+            cu.event(
+                f"Finished Jira member fetch for '{group}'. Found {len(members)} members.",
+                level="SUCCESS",
+            )
             break
 
-        # Otherwise, advance
         start_at += limit
 
     return members
 
 
 # ---------------------------------------------------------------------------
-# Confluence group members via REST API
+# Confluence group members via REST API + email_map lookup
 # ---------------------------------------------------------------------------
 
-def _fetch_confluence_group_members(group: str) -> List[Tuple[str, Optional[str]]]:
+def _fetch_confluence_group_members(
+    group: str,
+    email_map: Dict[str, Optional[str]],
+) -> List[Tuple[str, Optional[str]]]:
     """
     Fetch Confluence group members via:
-    GET /rest/api/group/{group}/member?limit=<limit>&start=<start>
+      GET /rest/api/group/{group}/member?limit=<limit>&start=<start>
+
+    Then enrich email via email_map from getAllEmails.
 
     Returns:
-    list of (username, email) tuples
-
-    In your example response:
-    - username = Confluence username
-    - email is NOT present in this payload, so we set email=None
-        (your dg_user model allows email to be nullable).
+      list of (username, email) tuples
     """
     headers = _get_auth_header("confluence")
     session = get_external_api_session()
@@ -132,16 +165,14 @@ def _fetch_confluence_group_members(group: str) -> List[Tuple[str, Optional[str]
     api_path = f"{CONF_BASE_URL}api/group/{encoded_group}/member"
 
     members: List[Tuple[str, Optional[str]]] = []
-
     limit = 200
     start = 0
 
-    cu.header(f"Starting Confluence group members fetch for group: {group}")
+    cu.header(f"Fetching Confluence members for group: {group}")
+
     while True:
         url = f"{api_path}?limit={limit}&start={start}"
         resp = session.get(url, headers=headers)
-
-        # respect rate limit: 1 req/sec
         time.sleep(REQUEST_SLEEP_SECONDS)
 
         if resp.status_code != 200:
@@ -156,15 +187,16 @@ def _fetch_confluence_group_members(group: str) -> List[Tuple[str, Optional[str]
 
         for user in results:
             username = user.get("username")
-            # Confluence REST here doesn't expose email -> store None
-            email = None
-            if username:
-                members.append((username, email))
+            if not username:
+                continue
+            email = email_map.get(username.lower())
+            members.append((username, email))
 
-        size = len(results)
-        if size < limit:
-            # No more pages
-            cu.event(f" Finished Confluence group members fetch for group: {group}. Found {len(members)} members.", level="SUCCESS")
+        if len(results) < limit:
+            cu.event(
+                f"Finished Confluence member fetch for '{group}'. Found {len(members)} members.",
+                level="SUCCESS",
+            )
             break
 
         start += limit
@@ -173,33 +205,64 @@ def _fetch_confluence_group_members(group: str) -> List[Tuple[str, Optional[str]
 
 
 # ---------------------------------------------------------------------------
-# Adapter used by dg_service.sync_all_group_owners
+# Adapter for dg_services.sync_all_group_owners
 # ---------------------------------------------------------------------------
 
-def fetch_members_for_group(app: str, owning_group_name: str, email_map: dict[str, Optional[str]]):
+def fetch_members_for_group(
+    app: str,
+    owning_group_name: str,
+    confluence_email_map: Dict[str, Optional[str]],
+) -> Iterable[Tuple[str, Optional[str]]]:
+    """
+    Adapter function used by sync_all_group_owners().
+
+    Given:
+      app: 'jira' or 'confluence'
+      owning_group_name: group to fetch members for
+
+    Returns:
+      iterable of (username, email)
+    """
     app = app.lower()
+
+    cu.header("Fetching members for")
+    cu.dictionary({"app": app, "group": owning_group_name}, expand=False)
+
     if app == "jira":
         return _fetch_jira_group_members(owning_group_name)
+
     if app == "confluence":
-        return _fetch_confluence_group_members(owning_group_name, email_map)
-    cu.warning(f"[WARN] Unknown app '{app}'")
+        return _fetch_confluence_group_members(owning_group_name, confluence_email_map)
+
+    cu.warning(f"[WARN] Unknown app '{app}' in fetch_members_for_group; returning empty list.")
     return []
 
 
 # ---------------------------------------------------------------------------
-# Main entrypoint for scheduler
+# Main entrypoint
 # ---------------------------------------------------------------------------
 
 def main():
-    cu.header("Starting main refresh job")
+    """
+    Scheduled job entrypoint.
 
-    email_map = fetch_all_confluence_emails()
+    - Fetch Confluence email map once per run.
+    - For every configured owning-group relationship in the DB:
+      - Fetch members from Jira/Confluence REST APIs
+      - Reconcile membership-expanded GROUP_OWNER rows
+    """
+    cu.header("Starting refresh job")
+
+    # Fetch the Confluence email map once (per run)
+    confluence_email_map = fetch_all_confluence_emails()
 
     def wrapped_fetch(app: str, owning_group_name: str):
-        return fetch_members_for_group(app, owning_group_name, email_map)
+        return fetch_members_for_group(app, owning_group_name, confluence_email_map)
 
     sync_all_group_owners(wrapped_fetch)
-    cu.event("Completed main refresh job", level="SUCCESS")
+
+    cu.event("Completed refresh job", level="SUCCESS")
+
 
 if __name__ == "__main__":
     main()
