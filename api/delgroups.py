@@ -36,24 +36,49 @@ def get_db():
 # ---------------------------------------------------------------------------
 
 
-def get_or_create_user(db: Session, username: str, email: Optional[str]) -> DgUser:
-    lower_username = username.lower()
-    lower_email = email.lower() if email else None
+def get_or_create_user_by_email(
+    db: Session,
+    email: str,
+    username: Optional[str] = None,
+) -> DgUser:
+    """
+    get_or_create_user_by_email finds or creates a DgUser keyed by email.
 
-    q = db.query(DgUser).filter(DgUser.lower_username == lower_username)
-    if lower_email is None:
-        q = q.filter(DgUser.lower_email.is_(None))
-    else:
-        q = q.filter(DgUser.lower_email == lower_email)
+    Email is the identity/verification method (case-insensitive).
+    Username is optional; if omitted and the user must be created, it will default
+    to the email prefix (text before '@').
 
-    user = q.one_or_none()
+    <details><summary><span>Parameters</span></summary>
+    | Name | Type | Description |
+    |------|------|-------------|
+    | `db` | `Session` | SQLAlchemy session |
+    | `email` | `str` | User email address (identity key) |
+    | `username` | `str \| None` | Optional username for display/storage |
+    </details>
+
+    <details><summary><span>Returns</span></summary>
+
+    A `DgUser` ORM object representing the user row.
+    </details>
+    """
+    lower_email = email.lower()
+
+    user = db.query(DgUser).filter(DgUser.lower_email == lower_email).one_or_none()
     if user:
+        # Optionally backfill username if missing and provided
+        if username and (not user.username or user.username.strip() == ""):
+            user.username = username
+            user.lower_username = username.lower()
+            db.flush()
         return user
+
+    if not username:
+        username = email.split("@", 1)[0]
 
     user = DgUser(
         username=username,
         email=email,
-        lower_username=lower_username,
+        lower_username=username.lower(),
         lower_email=lower_email,
     )
     db.add(user)
@@ -62,6 +87,22 @@ def get_or_create_user(db: Session, username: str, email: Optional[str]) -> DgUs
 
 
 def get_managed_group(db: Session, app: str, group_name: str) -> DgManagedGroup:
+    """
+    get_managed_group fetches an existing delegated group from dg_managed_group.
+
+    <details><summary><span>Parameters</span></summary>
+    | Name | Type | Description |
+    |------|------|-------------|
+    | `db` | `Session` | SQLAlchemy session |
+    | `app` | `str` | Application name: `jira` or `confluence` |
+    | `group_name` | `str` | Delegated group name |
+    </details>
+
+    <details><summary><span>Returns</span></summary>
+
+    A `DgManagedGroup` ORM object.
+    </details>
+    """
     group = (
         db.query(DgManagedGroup)
         .filter(DgManagedGroup.app == app.lower())
@@ -79,6 +120,26 @@ def require_owner_by_email(
     app: str,
     group_name: str,
 ) -> DgManagedGroup:
+    """
+    require_owner_by_email enforces that the requester is an effective owner of a delegated group.
+
+    Requester identity is verified via email (smtp) returned by EmployeeService
+    and injected by get_current_email.
+
+    <details><summary><span>Parameters</span></summary>
+    | Name | Type | Description |
+    |------|------|-------------|
+    | `db` | `Session` | SQLAlchemy session |
+    | `requester_email` | `str` | Requester email (smtp) |
+    | `app` | `str` | Application name: `jira` or `confluence` |
+    | `group_name` | `str` | Delegated group name |
+    </details>
+
+    <details><summary><span>Returns</span></summary>
+
+    The `DgManagedGroup` row if the requester is an owner. Otherwise raises `HTTPException(403)`.
+    </details>
+    """
     managed_group = get_managed_group(db, app, group_name)
 
     requester = (
@@ -123,12 +184,14 @@ async def add_user_owner(
 
     Only existing effective owners of the delegated group may add/remove owners.
     Ownership verification is performed using the requester's email (smtp) from
-    the EmployeeService identity payload.
+    EmployeeService via request headers.
+
+    Email is the identity key for the user being added.
 
     <details><summary><span>Parameters</span></summary>
     | Name | Type | Description |
     |------|------|-------------|
-    | `req` | `UserOwnerRequest` | JSON body containing the app + delegated group + target user to add as a USER_OWNER |
+    | `req` | `UserOwnerRequest` | JSON body containing the app + delegated group + target user email |
     </details>
 
     <details><summary><span>UserOwnerRequest</span></summary>
@@ -136,8 +199,8 @@ async def add_user_owner(
     |------|------|-------------|
     | `app` | `str` | Application name: `jira` or `confluence` |
     | `group_name` | `str` | Delegated group name to update |
-    | `username` | `str` | Username of the user to add as a direct owner |
-    | `email` | `str \| null` | Optional email for the user (recommended to avoid duplicates) |
+    | `email` | `str` | Email of the user to add as a direct owner |
+    | `username` | `str \| null` | Optional username for display/storage |
     </details>
 
     <details><summary><span>Returns</span></summary>
@@ -148,7 +211,7 @@ async def add_user_owner(
     </details>
     """
     managed_group = require_owner_by_email(db, requester_email, req.app, req.group_name)
-    user = get_or_create_user(db, req.username, req.email)
+    user = get_or_create_user_by_email(db, email=req.email, username=req.username)
 
     exists = (
         db.query(DgGroupOwner)
@@ -186,12 +249,14 @@ async def remove_user_owner(
 
     Only existing effective owners of the delegated group may add/remove owners.
     Ownership verification is performed using the requester's email (smtp) from
-    the EmployeeService identity payload.
+    EmployeeService via request headers.
+
+    Email is the identity key for the user being removed.
 
     <details><summary><span>Parameters</span></summary>
     | Name | Type | Description |
     |------|------|-------------|
-    | `req` | `UserOwnerRequest` | JSON body containing the app + delegated group + target user to remove as a USER_OWNER |
+    | `req` | `UserOwnerRequest` | JSON body containing the app + delegated group + target user email |
     </details>
 
     <details><summary><span>UserOwnerRequest</span></summary>
@@ -199,8 +264,8 @@ async def remove_user_owner(
     |------|------|-------------|
     | `app` | `str` | Application name: `jira` or `confluence` |
     | `group_name` | `str` | Delegated group name to update |
-    | `username` | `str` | Username of the user to remove as a direct owner |
-    | `email` | `str \| null` | Optional email for the user (if provided, removal is scoped to that identity) |
+    | `email` | `str` | Email of the user to remove as a direct owner |
+    | `username` | `str \| null` | Optional username (ignored for removal) |
     </details>
 
     <details><summary><span>Returns</span></summary>
@@ -212,13 +277,9 @@ async def remove_user_owner(
     """
     managed_group = require_owner_by_email(db, requester_email, req.app, req.group_name)
 
-    q = db.query(DgUser).filter(DgUser.lower_username == req.username.lower())
-    if req.email:
-        q = q.filter(DgUser.lower_email == req.email.lower())
-
-    user = q.one_or_none()
+    user = db.query(DgUser).filter(DgUser.lower_email == req.email.lower()).one_or_none()
     if not user:
-        raise HTTPException(status_code=404, detail="Target user not found")
+        raise HTTPException(status_code=404, detail="Target user not found by email")
 
     deleted = (
         db.query(DgGroupOwner)
@@ -248,7 +309,7 @@ async def add_group_owner(
 
     Only existing effective owners of the delegated group may add/remove owners.
     Ownership verification is performed using the requester's email (smtp) from
-    the EmployeeService identity payload.
+    EmployeeService via request headers.
 
     <details><summary><span>Parameters</span></summary>
     | Name | Type | Description |
@@ -312,7 +373,7 @@ async def remove_group_owner(
 
     Only existing effective owners of the delegated group may add/remove owners.
     Ownership verification is performed using the requester's email (smtp) from
-    the EmployeeService identity payload.
+    EmployeeService via request headers.
 
     <details><summary><span>Parameters</span></summary>
     | Name | Type | Description |
@@ -382,6 +443,7 @@ async def create_group_with_owners(
     Behavior:
     - Creates a new `dg_managed_group` row for (app, group_name)
     - Inserts direct USER_OWNERS into `dg_group_owner` with `source_type='USER_OWNER'`
+      (users are identified by email)
     - Registers GROUP_OWNER rules in `dg_group_owner_group`
       (member expansion happens during the scheduled refresh job)
 
@@ -396,7 +458,7 @@ async def create_group_with_owners(
     |------|------|-------------|
     | `app` | `str` | Application name: `jira` or `confluence` |
     | `group_name` | `str` | Delegated group name to create |
-    | `user_owners` | `list[UserOwner]` | Direct user owners to add immediately |
+    | `user_owners` | `list[UserOwner]` | Direct user owners to add immediately (identified by email) |
     | `group_owners` | `list[str]` | Owning group names to register as GROUP_OWNERS (refresh expands members) |
     </details>
 
@@ -433,7 +495,7 @@ async def create_group_with_owners(
     db.flush()
 
     for u in req.user_owners:
-        user = get_or_create_user(db, u.username, u.email)
+        user = get_or_create_user_by_email(db, email=u.email, username=getattr(u, "username", None))
         db.add(
             DgGroupOwner(
                 managed_group_id=group.id,
