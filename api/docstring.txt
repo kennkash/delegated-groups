@@ -1,0 +1,28 @@
+"""
+    split_screen duplicates the existing screen configuration for the chosen project, then substitute the shared scheme with the new, project‑specific copy
+    
+    <details><summary><span>Parameters</span></summary>
+    | Name         | Type     | Description                                            |
+    |--------------|----------|--------------------------------------------------------|
+    | `projectKey` | `str`    | The key of the project for which a dedicated, project‑specific screen configuration should be created      |
+    | `suffix`     | `str`    | Text that will be appended to the names of the duplicated schemes (e.g., “TeamA”). If omitted, projectKey is used. |
+    </details>
+    
+    <details><summary><span>Returns</span></summary>
+
+    An `ORJSONResponse` whose content is a list of objects, each containing:
+
+    * `success` – script ran without error (`true`) or failed (`false`)
+    * `message` – human‑readable status (success or error text)
+    * `projectKey` – Jira project key the script was applied to
+    * `originalITSS` – *id:name* of the original Issue‑Type Screen Scheme
+    * `newITSS` –  *id:name* of the newly created Issue‑TypeScreen Scheme
+    * `suffixUsed` – suffix appended to duplicated scheme names
+    * `clonedMappings`– list with details for each cloned screen scheme:
+        * `issueTypeId` – name of the issue type (e.g. *Bug*, *Task*)
+        * `originalSS` - *id:name* of the original Screen Scheme
+        * `newSS` – *id:name* of the new Screen Scheme
+        * `originalS` – *id:name* of the original Screen
+        * `newS` – *id:name* of the new Screen
+    </details>
+    """
