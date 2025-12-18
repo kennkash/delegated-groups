@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Request
 
 from sqlalchemy.orm import Session
 from services.v0.user_email import get_current_email
-from ..models.delGroups import UserOwnerRequest, GroupOwnerRequest, NewGroupUserOwner, NewGroupRequest, FindGroupsByEmailRequest
+from ..models.delGroups import UserOwnerRequest, GroupOwnerRequest, NewGroupRequest
 from ..models.psql_models import (
     SessionLocal,
     DgUser,
