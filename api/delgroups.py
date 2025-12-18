@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import json
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Depends, Request
+
 from sqlalchemy.orm import Session
-
-from api.v0.deps.current_user import get_current_email  # <-- USE THE DEP
-
-from .database.psql_models import (
+from services.v0.user_email import get_current_email
+from ..models.delGroups import UserOwnerRequest, GroupOwnerRequest, NewGroupUserOwner, NewGroupRequest, FindGroupsByEmailRequest
+from ..models.psql_models import (
     SessionLocal,
     DgUser,
     DgManagedGroup,
@@ -16,8 +16,7 @@ from .database.psql_models import (
     DgGroupOwnerGroup,
 )
 
-router = APIRouter(prefix="/delegated-groups", tags=["Delegated Groups"])
-
+router = APIRouter()
 
 # ---------------------------------------------------------------------------
 # DB dependency
@@ -29,39 +28,6 @@ def get_db():
         yield db
     finally:
         db.close()
-
-
-# ---------------------------------------------------------------------------
-# Request models
-# ---------------------------------------------------------------------------
-
-class UserOwnerRequest(BaseModel):
-    app: str
-    group_name: str
-    username: str
-    email: Optional[str] = None
-
-
-class GroupOwnerRequest(BaseModel):
-    app: str
-    group_name: str
-    owning_group_name: str
-
-
-class NewGroupUserOwner(BaseModel):
-    username: str
-    email: Optional[str] = None
-
-
-class NewGroupRequest(BaseModel):
-    app: str
-    group_name: str
-    user_owners: List[NewGroupUserOwner] = []
-    group_owners: List[str] = []
-
-
-class FindGroupsByEmailRequest(BaseModel):
-    email: str
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +81,7 @@ def require_owner_by_email(
 
     requester = (
         db.query(DgUser)
-        .filter(DgUser.lower_email == requester_email)
+        .filter(DgUser.lower_email == requester_email.lower())
         .one_or_none()
     )
     if not requester:
@@ -324,19 +290,19 @@ async def create_group_with_owners(
     return {"status": "delegated group created", "app": app, "group_name": req.group_name}
 
 
-@router.post("/my-groups")
+@router.get("/my-groups")
 async def find_groups_by_email(
-    req: FindGroupsByEmailRequest,
+    requester_email: str = Depends(get_current_email),
     db: Session = Depends(get_db),
 ):
- """
+    """
     Returns the groups the *current requester* is an effective owner of,
     using smtp (email) resolved from EmployeeService via request headers.
 
     No payload required.
-    """
     
-    user = db.query(DgUser).filter(DgUser.lower_email == req.email.lower()).one_or_none()
+    """
+    user = db.query(DgUser).filter(DgUser.lower_email == requester_email.lower()).one_or_none()
     if not user:
         return []
 
