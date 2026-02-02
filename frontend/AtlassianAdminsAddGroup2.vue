@@ -55,6 +55,8 @@
                 :menu-props="{ contentClass: props.darkMode ? 'dark-dropdown' : '' }"
                 :class="{ 'dark-theme2': props.darkMode }"
                 prepend-inner-icon="mdi-magnify"
+                @focus="onFocus"
+                @blur="onBlur"
                 @update:search="onSearchUpdate"
                 @update:modelValue="onGroupChange"
               />
@@ -94,21 +96,32 @@ const props = defineProps({
 
 const emit = defineEmits(['update:modelValue', 'reloadOwners'])
 
+/* ----------------------------
+   Dialog state
+---------------------------- */
 const showModal = ref(props.modelValue)
 
+/* ----------------------------
+   Autocomplete state
+---------------------------- */
 const loadingGroups = ref(false)
 const searchQuery = ref('')
+const filteredGroups = ref([]) // [{ name: 'Group A' }, ...]
+const debounceTime = 300
 
-// Tracks last meaningful user query so we can restore it if Vuetify clears search on select (3.1.2 quirk)
+// Focus tracking: only preserve/restore search while user is actively in the field
+const isFocused = ref(false)
+
+// Vuetify 3.1.2 quirk handling
 const lastNonEmptyQuery = ref('')
 const justSelected = ref(false)
 
-const filteredGroups = ref([])
-const debounceTime = 300 // ms
-
+/* ----------------------------
+   Form data
+---------------------------- */
 const formData = ref({
   app: null,
-  group: [],
+  group: [], // multiple => array
 })
 
 /* ----------------------------
@@ -131,11 +144,15 @@ const noDataText = computed(() => {
 })
 
 const canSubmit = computed(() => {
-  return !!formData.value.app && Array.isArray(formData.value.group) && formData.value.group.length > 0
+  return (
+    !!formData.value.app &&
+    Array.isArray(formData.value.group) &&
+    formData.value.group.length > 0
+  )
 })
 
 /* ----------------------------
-   v-model syncing for dialog
+   Dialog v-model syncing
 ---------------------------- */
 watch(
   () => props.modelValue,
@@ -150,9 +167,25 @@ watch(showModal, (newVal) => {
 })
 
 /* ----------------------------
+   Focus / blur behavior
+---------------------------- */
+const onFocus = () => {
+  isFocused.value = true
+}
+
+const onBlur = () => {
+  // When leaving the field: clear search and DO NOT resurrect it later.
+  isFocused.value = false
+  searchQuery.value = ''
+  lastNonEmptyQuery.value = ''
+  justSelected.value = false
+}
+
+/* ----------------------------
    App selection handler
 ---------------------------- */
 const handleAppSelected = () => {
+  // Switching apps should clear everything
   filteredGroups.value = []
   searchQuery.value = ''
   lastNonEmptyQuery.value = ''
@@ -161,25 +194,36 @@ const handleAppSelected = () => {
 
 /* ----------------------------
    Vuetify 3.1.2 search-clearing workaround
+   - Keep query after selection while focused
+   - Do NOT restore query after blur / chip delete outside the field
 ---------------------------- */
 const onGroupChange = async () => {
+  // Chip delete often happens while NOT focused; don't restore anything then.
+  if (!isFocused.value) return
+
   // Selection happened; Vuetify may emit update:search '' right after.
   justSelected.value = true
 
   await nextTick()
 
-  // If search got cleared by the component, restore it.
+  // If Vuetify cleared search immediately after a selection, restore it.
   if ((searchQuery.value ?? '') === '' && lastNonEmptyQuery.value) {
     searchQuery.value = lastNonEmptyQuery.value
   }
 
-  // Release flag next tick (covers event ordering)
   setTimeout(() => {
     justSelected.value = false
   }, 0)
 }
 
 const onSearchUpdate = (val) => {
+  // If not focused, do not track or restore search text.
+  if (!isFocused.value) {
+    searchQuery.value = ''
+    lastNonEmptyQuery.value = ''
+    return
+  }
+
   const v = (val ?? '')
 
   // If Vuetify tries to clear right after selecting, ignore it and restore.
@@ -188,10 +232,10 @@ const onSearchUpdate = (val) => {
     return
   }
 
-  // Normal behavior
+  // Normal update
   searchQuery.value = v
 
-  // Persist last real query
+  // Persist last real query (only while focused)
   if (v.trim().length > 0) {
     lastNonEmptyQuery.value = v
   }
@@ -199,6 +243,9 @@ const onSearchUpdate = (val) => {
 
 /* ----------------------------
    Server-side search (debounced)
+   Uses NEW endpoints via store:
+   - confGroupsSearch({ q, limit })
+   - jiraGroupsSearch({ q, limit })
 ---------------------------- */
 const runSearch = async (query) => {
   if (!formData.value.app) return
@@ -227,7 +274,6 @@ const runSearch = async (query) => {
     for (const g of [...selected, ...results]) {
       if (g?.name) map.set(g.name, g)
     }
-
     filteredGroups.value = Array.from(map.values())
   } catch (error) {
     console.error('Search error:', error)
@@ -238,8 +284,7 @@ const runSearch = async (query) => {
 
 const debouncedSearch = debounce(runSearch, debounceTime)
 
-// When the search changes, query server.
-// NOTE: we keep this watch because onSearchUpdate writes searchQuery for both typing + restoration.
+// Query server whenever searchQuery changes (typing + our restore logic)
 watch(searchQuery, (q) => {
   debouncedSearch(q)
 })
@@ -255,6 +300,8 @@ const resetForm = () => {
   filteredGroups.value = []
   searchQuery.value = ''
   lastNonEmptyQuery.value = ''
+  justSelected.value = false
+  isFocused.value = false
 }
 
 const closeDialog = () => {
