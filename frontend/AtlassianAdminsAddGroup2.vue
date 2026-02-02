@@ -51,9 +51,12 @@
                 closable-chips
                 variant="outlined"
                 clear-on-select="false"
+                close-on-select="false"
                 :menu-props="{ contentClass: props.darkMode ? 'dark-dropdown' : '' }"
                 :class="{ 'dark-theme2': props.darkMode }"
                 prepend-inner-icon="mdi-magnify"
+                @update:search="onSearchUpdate"
+                @update:modelValue="onGroupChange"
               />
             </v-col>
           </v-row>
@@ -77,14 +80,11 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { debounce } from 'lodash'
 import { useDGStore } from '@/stores/delegatedgroups'
-// If you use toast, keep your existing import; otherwise remove.
-// import { useToast } from 'vue-toastification'
 
 const dgroups = useDGStore()
-// const toast = useToast()
 
 const props = defineProps({
   modelValue: Boolean,
@@ -99,14 +99,16 @@ const showModal = ref(props.modelValue)
 const loadingGroups = ref(false)
 const searchQuery = ref('')
 
-// v-autocomplete items are objects for stability: [{ name: 'Group A' }, ...]
-const filteredGroups = ref([])
+// Tracks last meaningful user query so we can restore it if Vuetify clears search on select (3.1.2 quirk)
+const lastNonEmptyQuery = ref('')
+const justSelected = ref(false)
 
+const filteredGroups = ref([])
 const debounceTime = 300 // ms
 
 const formData = ref({
   app: null,
-  group: [], // IMPORTANT: multiple requires array (not null)
+  group: [],
 })
 
 /* ----------------------------
@@ -149,20 +151,54 @@ watch(showModal, (newVal) => {
 
 /* ----------------------------
    App selection handler
-   (IMPORTANT: no longer loads 1000+ groups)
 ---------------------------- */
 const handleAppSelected = () => {
-  // Clear any previous state when switching apps
   filteredGroups.value = []
   searchQuery.value = ''
+  lastNonEmptyQuery.value = ''
   formData.value.group = []
 }
 
 /* ----------------------------
+   Vuetify 3.1.2 search-clearing workaround
+---------------------------- */
+const onGroupChange = async () => {
+  // Selection happened; Vuetify may emit update:search '' right after.
+  justSelected.value = true
+
+  await nextTick()
+
+  // If search got cleared by the component, restore it.
+  if ((searchQuery.value ?? '') === '' && lastNonEmptyQuery.value) {
+    searchQuery.value = lastNonEmptyQuery.value
+  }
+
+  // Release flag next tick (covers event ordering)
+  setTimeout(() => {
+    justSelected.value = false
+  }, 0)
+}
+
+const onSearchUpdate = (val) => {
+  const v = (val ?? '')
+
+  // If Vuetify tries to clear right after selecting, ignore it and restore.
+  if (v === '' && justSelected.value && lastNonEmptyQuery.value) {
+    searchQuery.value = lastNonEmptyQuery.value
+    return
+  }
+
+  // Normal behavior
+  searchQuery.value = v
+
+  // Persist last real query
+  if (v.trim().length > 0) {
+    lastNonEmptyQuery.value = v
+  }
+}
+
+/* ----------------------------
    Server-side search (debounced)
-   Uses NEW endpoints:
-   - /v0/conf-internal-groups/search?q=...&limit=25
-   - /v0/jira-internal-groups/search?q=...&limit=25
 ---------------------------- */
 const runSearch = async (query) => {
   if (!formData.value.app) return
@@ -177,9 +213,6 @@ const runSearch = async (query) => {
 
   loadingGroups.value = true
   try {
-    // Call your NEW store search functions:
-    // confGroupsSearch({ q, limit })
-    // jiraGroupsSearch({ q, limit })
     const names =
       formData.value.app === 'confluence'
         ? await dgroups.confGroupsSearch({ q, limit: 25 })
@@ -198,7 +231,6 @@ const runSearch = async (query) => {
     filteredGroups.value = Array.from(map.values())
   } catch (error) {
     console.error('Search error:', error)
-    // toast?.error?.('Search failed. Please try again.')
   } finally {
     loadingGroups.value = false
   }
@@ -206,7 +238,8 @@ const runSearch = async (query) => {
 
 const debouncedSearch = debounce(runSearch, debounceTime)
 
-// Whenever the user types, run the search
+// When the search changes, query server.
+// NOTE: we keep this watch because onSearchUpdate writes searchQuery for both typing + restoration.
 watch(searchQuery, (q) => {
   debouncedSearch(q)
 })
@@ -221,6 +254,7 @@ const resetForm = () => {
   }
   filteredGroups.value = []
   searchQuery.value = ''
+  lastNonEmptyQuery.value = ''
 }
 
 const closeDialog = () => {
@@ -230,7 +264,6 @@ const closeDialog = () => {
 
 async function saveChanges() {
   try {
-    // formData.group is an array of selected group names
     await dgroups.addDelegatedGroup(formData.value.app, formData.value.group)
   } catch (e) {
     console.error('Add failed:', e)
