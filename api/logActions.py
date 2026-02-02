@@ -86,3 +86,22 @@ def write_audit(
             user_agent=user_agent,
         )
     )
+    
+    
+write_audit(
+            db,
+            actor_username=actor_username,
+            actor_email=actor_email,
+            action="DELETE_DELEGATED_GROUP",
+            status="SUCCESS",
+            app=app,
+            delegated_group_id=group.id,
+            delegated_group_name=group.group_name,
+            details={
+                "input": req.model_dump(),
+                "deleted_owner_rows": deleted_owner_rows,
+                "deleted_group_owner_rules": deleted_group_owner_rules,
+            },
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
