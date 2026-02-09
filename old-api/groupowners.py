@@ -10,29 +10,35 @@ from services.external_api.confRequests import ConfAPIClient
 conf_client = ConfAPIClient()
 
 
-@cache(expire=60 * 30, namespace="conf_user")  # 30 min; tweak if you want
+from fastapi_cache.decorator import cache
+import urllib.parse
+from typing import Any, Dict
+
+from services.external_api.confRequests import ConfAPIClient
+from services.profile_pic_fetcher import ProfilePicFetcher
+
+conf_client = ConfAPIClient()
+
+@cache(expire=60 * 30, namespace="conf_user")  # 30 min
 async def _fetch_conf_user_cached(username: str) -> Dict[str, Any]:
     """
-    Cached Confluence user lookup returning legacy-shaped object:
+    ONE Confluence call. Returns:
       { username, displayName, profilePictureId }
-
-    - displayName from Confluence user API
-    - profilePictureId from ProfilePicFetcher.fetchC_profpic() normalization
     """
-    # displayName
     try:
         data = await conf_client.get(f"api/user?username={urllib.parse.quote(username)}")
-        display = data.get("displayName") or "Inactive User [X]"
     except Exception:
-        display = "Inactive User [X]"
+        return {
+            "username": username,
+            "displayName": "Inactive User [X]",
+            "profilePictureId": "default",
+        }
 
-    # profilePictureId (trusted normalization)
-    try:
-        prof_id = await ProfilePicFetcher(username).fetchC_profpic()
-    except Exception:
-        prof_id = "default"
+    display = data.get("displayName") or "Inactive User [X]"
+    prof_id = ProfilePicFetcher.normalize_conf_profile_picture_id(data)
 
     return {"username": username, "displayName": display, "profilePictureId": prof_id}
+    
     
     async def _fetch_conf_group_members_all(group_name: str) -> List[Dict[str, Any]]:
     """
@@ -219,3 +225,20 @@ class ConfGroupOwnerResponse(BaseModel):
     allUserOwners: List[UserOwnerResponse] = Field(default_factory=list)
     group: str = Field(..., example="Cleans")
     
+    
+    
+class ProfilePicFetcher:
+    ...
+    @staticmethod
+    def normalize_conf_profile_picture_id(conf_user_payload: Dict[str, Any]) -> str:
+        """
+        Given the Confluence user payload (from /rest/api/user?username=...),
+        return the normalized profilePictureId using the same business rules.
+        """
+        raw_path = conf_user_payload.get("profilePicture", {}).get("path")
+        if not raw_path:
+            return "default"
+        return ProfilePicFetcher._normalize_conf_path(raw_path)
+        
+        
+        
