@@ -38,6 +38,59 @@ class ProfilePicFetcher:
     # ------------------------------------------------------------------ #
     #  Private helper methods – pure functions, easy to unit‑test
     # ------------------------------------------------------------------ #
+    from urllib.parse import parse_qs
+
+class ProfilePicFetcher:
+    ...
+    @staticmethod
+    def normalize_jira_profile_picture_id(jira_user_payload: Dict[str, Any]) -> str:
+        """
+        Given a Jira user payload (from /rest/api/2/user?username=...),
+        return the normalized profilePictureId query string, e.g.:
+
+          "ownerId=janedoe1&avatarId=12104"
+
+        If missing, return "avatarId=10122".
+        """
+        avatar_url = (jira_user_payload.get("avatarUrls") or {}).get("48x48")
+        if not avatar_url:
+            return "avatarId=10122"
+
+        # reuse the same rule as fetchJ_profpic: take everything after '?'
+        qs = ProfilePicFetcher._strip_query(avatar_url)
+        return qs or "avatarId=10122"
+
+    @staticmethod
+    def jira_avatar_parts_from_profile_picture_id(profile_picture_id: str) -> Dict[str, str]:
+        """
+        Parse the query-string style profilePictureId into:
+          ownerId, avatarId, profilePictureId
+
+        Ensures the same defaults you use today:
+          ownerId -> "undefined" if missing
+          avatarId -> "10122" if missing
+        """
+        owner_id = "undefined"
+        avatar_id = "10122"
+
+        try:
+            parsed = parse_qs(profile_picture_id or "", keep_blank_values=True)
+            if parsed.get("ownerId"):
+                owner_id = parsed["ownerId"][0] or "undefined"
+            if parsed.get("avatarId"):
+                avatar_id = parsed["avatarId"][0] or "10122"
+        except Exception:
+            pass
+
+        return {
+            "ownerId": owner_id,
+            "avatarId": avatar_id,
+            "profilePictureId": f"ownerId={owner_id}&avatarId={avatar_id}",
+        }
+    
+    
+    
+    
     @staticmethod
     def _extract_jira_avatar(data: List[Dict[str, Any]]) -> Optional[str]:
         """JIRA returns a list; take the first element's 48×48 avatar URL."""
