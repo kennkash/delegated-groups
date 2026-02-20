@@ -1,4 +1,21 @@
+names = final_df["name"].tolist()
+
+if names:
+    rows_to_delete = (
+        session.query(table)
+        .filter(~table.name.in_(names))
+        .all()
+    )
+else:
+    # If the pull returned nothing, don't delete everything automatically.
+    print("WARNING: final_df is empty — skipping delete step.")
+    rows_to_delete = []
+
+
+
+
 def get_delegated_groups(app: str) -> pd.DataFrame:
+
     if app == "confluence":
         column = "conf"
     else:
